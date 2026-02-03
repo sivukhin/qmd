@@ -109,3 +109,14 @@ export {
 // =============================================================================
 
 export { formatQueryForEmbedding, formatDocForEmbedding } from "./llm";
+
+// =============================================================================
+// Re-export Turso implementation
+// =============================================================================
+
+export {
+  createTursoStore,
+  type TursoStore,
+  type TursoDatabase,
+  type TursoStatement,
+} from "./store_turso";

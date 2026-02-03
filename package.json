@@ -31,6 +31,7 @@
     "sqlite-vec-win32-x64": "^0.1.7-alpha.2"
   },
   "devDependencies": {
+    "@tursodatabase/database": "^0.4.4",
     "@types/bun": "latest"
   },
   "peerDependencies": {
