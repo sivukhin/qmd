@@ -21,7 +21,7 @@ import {
   DEFAULT_MULTI_GET_MAX_BYTES,
 } from "./store.js";
 import type { RankedResult } from "./store.js";
-import { getQueryEmbedding } from "./store_sqlite.js";
+import { getQueryEmbedding } from "./store_util.js";
 
 // =============================================================================
 // Types for structured content

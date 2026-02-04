@@ -13,12 +13,8 @@ import { Glob } from "bun";
 import { statSync } from "node:fs";
 import * as sqliteVec from "sqlite-vec";
 import {
-  LlamaCpp,
   getDefaultLlamaCpp,
-  formatQueryForEmbedding,
-  formatDocForEmbedding,
   type RerankDocument,
-  type ILLMSession,
 } from "./llm";
 import {
   findContextForPath as collectionsFindContextForPath,
@@ -999,19 +995,6 @@ function searchFTS(db: Database, query: string, limit: number = 20, collectionId
 // Vector Search
 // =============================================================================
 
-export async function getQueryEmbedding(text: string, model: string, session?: ILLMSession): Promise<number[] | null> {
-  return await getEmbedding(text, model, true, session);
-}
-
-async function getEmbedding(text: string, model: string, isQuery: boolean, session?: ILLMSession): Promise<number[] | null> {
-  // Format text using the appropriate prompt template
-  const formattedText = isQuery ? formatQueryForEmbedding(text) : formatDocForEmbedding(text);
-  const result = session
-    ? await session.embed(formattedText, { model, isQuery })
-    : await getDefaultLlamaCpp().embed(formattedText, { model, isQuery });
-  return result?.embedding || null;
-}
-
 async function searchVec(db: Database, generate: () => Promise<number[] | null>, limit: number = 20, collectionName?: string): Promise<SearchResult[]> {
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
   if (!tableExists) return [];
@@ -1102,7 +1085,7 @@ async function searchVec(db: Database, generate: () => Promise<number[] | null>,
 // Query Expansion & Reranking
 // =============================================================================
 
-async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, db: Database): Promise<string[]> {
+async function expandQuery(db: Database, query: string, model: string = DEFAULT_QUERY_MODEL): Promise<string[]> {
   // Check cache first
   const cacheKey = getCacheKey("expandQuery", { query, model });
   const cached = getCachedResult(db, cacheKey);
@@ -1125,7 +1108,7 @@ async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, d
   return Array.from(new Set([query, ...queryTexts]));
 }
 
-async function rerank(query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL, db: Database): Promise<{ file: string; score: number }[]> {
+async function rerank(db: Database, query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL): Promise<{ file: string; score: number }[]> {
   const cachedResults: Map<string, number> = new Map();
   const uncachedDocs: RerankDocument[] = [];
 
@@ -1530,8 +1513,8 @@ export function createStore(dbPath?: string): Store {
     searchVec: (generate: () => Promise<number[] | null>, limit?: number, collectionName?: string) => searchVec(db, generate, limit, collectionName),
 
     // Query expansion & reranking
-    expandQuery: (query: string, model?: string) => expandQuery(query, model, db),
-    rerank: (query: string, documents: { file: string; text: string }[], model?: string) => rerank(query, documents, model, db),
+    expandQuery: (query: string, model?: string) => expandQuery(db, query, model),
+    rerank: (query: string, documents: { file: string; text: string }[], model?: string) => rerank(db, query, documents, model),
 
     // Document retrieval
     findDocument: (filename: string, options?: { includeBody?: boolean }) => findDocument(db, filename, options),

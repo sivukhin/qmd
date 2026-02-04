@@ -187,7 +187,7 @@ import {
   type Store,
 } from "./store";
 import type { RankedResult } from "./store";
-import { getQueryEmbedding } from "./store_sqlite";
+import { getQueryEmbedding } from "./store_util";
 // Note: searchResultsToMcpCsv no longer used in MCP - using structuredContent instead
 
 // =============================================================================

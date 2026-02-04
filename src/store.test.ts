@@ -41,7 +41,7 @@ import {
   type RankedResult,
 } from "./store.js";
 import type { CollectionConfig } from "./collections.js";
-import { getQueryEmbedding } from "./store_sqlite.js";
+import { getQueryEmbedding } from "./store_util.js";
 
 // =============================================================================
 // LlamaCpp Setup

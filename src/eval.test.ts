@@ -28,7 +28,7 @@ import {
   type RankedResult,
 } from "./store";
 import { getDefaultLlamaCpp, formatDocForEmbedding, disposeDefaultLlamaCpp } from "./llm";
-import { getQueryEmbedding } from "./store_sqlite";
+import { getQueryEmbedding } from "./store_util";
 
 // Eval queries with expected documents
 const evalQueries: {

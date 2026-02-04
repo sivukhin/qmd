@@ -20,7 +20,7 @@ import {
   CHUNK_SIZE_TOKENS,
   CHUNK_OVERLAP_TOKENS,
 } from "./store_types";
-import { getDefaultLlamaCpp } from "./llm";
+import { formatDocForEmbedding, formatQueryForEmbedding, getDefaultLlamaCpp, type ILLMSession } from "./llm";
 
 // =============================================================================
 // Environment
@@ -338,7 +338,7 @@ export function normalizeDocid(docid: string): string {
 
   // Strip surrounding quotes (single or double)
   if ((normalized.startsWith('"') && normalized.endsWith('"')) ||
-      (normalized.startsWith("'") && normalized.endsWith("'"))) {
+    (normalized.startsWith("'") && normalized.endsWith("'"))) {
     normalized = normalized.slice(1, -1);
   }
 
@@ -745,4 +745,21 @@ export function extractSnippet(body: string, query: string, maxLen = 500, chunkP
     linesAfter,
     snippetLines: snippetLineCount,
   };
+}
+
+// =============================================================================
+// Vector Search
+// =============================================================================
+
+export async function getQueryEmbedding(text: string, model: string, session?: ILLMSession): Promise<number[] | null> {
+  return await getEmbedding(text, model, true, session);
+}
+
+async function getEmbedding(text: string, model: string, isQuery: boolean, session?: ILLMSession): Promise<number[] | null> {
+  // Format text using the appropriate prompt template
+  const formattedText = isQuery ? formatQueryForEmbedding(text) : formatDocForEmbedding(text);
+  const result = session
+    ? await session.embed(formattedText, { model, isQuery })
+    : await getDefaultLlamaCpp().embed(formattedText, { model, isQuery });
+  return result?.embedding || null;
 }

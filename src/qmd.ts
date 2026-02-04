@@ -54,7 +54,7 @@ import {
   listAllContexts,
   setConfigIndexName,
 } from "./collections.js";
-import { getQueryEmbedding } from "./store_sqlite.js";
+import { getQueryEmbedding } from "./store_util.js";
 
 // Enable production mode - allows using default database path
 // Tests must set INDEX_PATH or use createStore() with explicit path
