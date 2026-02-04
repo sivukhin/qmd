@@ -28,6 +28,7 @@ import {
   type RankedResult,
 } from "./store";
 import { getDefaultLlamaCpp, formatDocForEmbedding, disposeDefaultLlamaCpp } from "./llm";
+import { getQueryEmbedding } from "./store_sqlite";
 
 // Eval queries with expected documents
 const evalQueries: {
@@ -35,39 +36,39 @@ const evalQueries: {
   expectedDoc: string;
   difficulty: "easy" | "medium" | "hard" | "fusion";
 }[] = [
-  // EASY: Exact keyword matches
-  { query: "API versioning", expectedDoc: "api-design", difficulty: "easy" },
-  { query: "Series A fundraising", expectedDoc: "fundraising", difficulty: "easy" },
-  { query: "CAP theorem", expectedDoc: "distributed-systems", difficulty: "easy" },
-  { query: "overfitting machine learning", expectedDoc: "machine-learning", difficulty: "easy" },
-  { query: "remote work VPN", expectedDoc: "remote-work", difficulty: "easy" },
-  { query: "Project Phoenix retrospective", expectedDoc: "product-launch", difficulty: "easy" },
+    // EASY: Exact keyword matches
+    { query: "API versioning", expectedDoc: "api-design", difficulty: "easy" },
+    { query: "Series A fundraising", expectedDoc: "fundraising", difficulty: "easy" },
+    { query: "CAP theorem", expectedDoc: "distributed-systems", difficulty: "easy" },
+    { query: "overfitting machine learning", expectedDoc: "machine-learning", difficulty: "easy" },
+    { query: "remote work VPN", expectedDoc: "remote-work", difficulty: "easy" },
+    { query: "Project Phoenix retrospective", expectedDoc: "product-launch", difficulty: "easy" },
 
-  // MEDIUM: Semantic/conceptual queries
-  { query: "how to structure REST endpoints", expectedDoc: "api-design", difficulty: "medium" },
-  { query: "raising money for startup", expectedDoc: "fundraising", difficulty: "medium" },
-  { query: "consistency vs availability tradeoffs", expectedDoc: "distributed-systems", difficulty: "medium" },
-  { query: "how to prevent models from memorizing data", expectedDoc: "machine-learning", difficulty: "medium" },
-  { query: "working from home guidelines", expectedDoc: "remote-work", difficulty: "medium" },
-  { query: "what went wrong with the launch", expectedDoc: "product-launch", difficulty: "medium" },
+    // MEDIUM: Semantic/conceptual queries
+    { query: "how to structure REST endpoints", expectedDoc: "api-design", difficulty: "medium" },
+    { query: "raising money for startup", expectedDoc: "fundraising", difficulty: "medium" },
+    { query: "consistency vs availability tradeoffs", expectedDoc: "distributed-systems", difficulty: "medium" },
+    { query: "how to prevent models from memorizing data", expectedDoc: "machine-learning", difficulty: "medium" },
+    { query: "working from home guidelines", expectedDoc: "remote-work", difficulty: "medium" },
+    { query: "what went wrong with the launch", expectedDoc: "product-launch", difficulty: "medium" },
 
-  // HARD: Vague, partial memory, indirect
-  { query: "nouns not verbs", expectedDoc: "api-design", difficulty: "hard" },
-  { query: "Sequoia investor pitch", expectedDoc: "fundraising", difficulty: "hard" },
-  { query: "Raft algorithm leader election", expectedDoc: "distributed-systems", difficulty: "hard" },
-  { query: "F1 score precision recall", expectedDoc: "machine-learning", difficulty: "hard" },
-  { query: "quarterly team gathering travel", expectedDoc: "remote-work", difficulty: "hard" },
-  { query: "beta program 47 bugs", expectedDoc: "product-launch", difficulty: "hard" },
+    // HARD: Vague, partial memory, indirect
+    { query: "nouns not verbs", expectedDoc: "api-design", difficulty: "hard" },
+    { query: "Sequoia investor pitch", expectedDoc: "fundraising", difficulty: "hard" },
+    { query: "Raft algorithm leader election", expectedDoc: "distributed-systems", difficulty: "hard" },
+    { query: "F1 score precision recall", expectedDoc: "machine-learning", difficulty: "hard" },
+    { query: "quarterly team gathering travel", expectedDoc: "remote-work", difficulty: "hard" },
+    { query: "beta program 47 bugs", expectedDoc: "product-launch", difficulty: "hard" },
 
-  // FUSION: Multi-signal queries that need both lexical AND semantic matching
-  // These should have weak individual scores but strong combined RRF scores
-  { query: "how much runway before running out of money", expectedDoc: "fundraising", difficulty: "fusion" },
-  { query: "datacenter replication sync strategy", expectedDoc: "distributed-systems", difficulty: "fusion" },
-  { query: "splitting data for training and testing", expectedDoc: "machine-learning", difficulty: "fusion" },
-  { query: "JSON response codes error messages", expectedDoc: "api-design", difficulty: "fusion" },
-  { query: "video calls camera async messaging", expectedDoc: "remote-work", difficulty: "fusion" },
-  { query: "CI/CD pipeline testing coverage", expectedDoc: "product-launch", difficulty: "fusion" },
-];
+    // FUSION: Multi-signal queries that need both lexical AND semantic matching
+    // These should have weak individual scores but strong combined RRF scores
+    { query: "how much runway before running out of money", expectedDoc: "fundraising", difficulty: "fusion" },
+    { query: "datacenter replication sync strategy", expectedDoc: "distributed-systems", difficulty: "fusion" },
+    { query: "splitting data for training and testing", expectedDoc: "machine-learning", difficulty: "fusion" },
+    { query: "JSON response codes error messages", expectedDoc: "api-design", difficulty: "fusion" },
+    { query: "video calls camera async messaging", expectedDoc: "remote-work", difficulty: "fusion" },
+    { query: "CI/CD pipeline testing coverage", expectedDoc: "product-launch", difficulty: "fusion" },
+  ];
 
 // Helper to check if result matches expected doc
 function matchesExpected(filepath: string, expectedDoc: string): boolean {
@@ -210,7 +211,7 @@ describe("Vector Search", () => {
     const easyQueries = evalQueries.filter(q => q.difficulty === "easy");
     let hits = 0;
     for (const { query, expectedDoc } of easyQueries) {
-      const results = await store.searchVec(query, DEFAULT_EMBED_MODEL, 5);
+      const results = await store.searchVec(() => getQueryEmbedding(query, DEFAULT_EMBED_MODEL), 5);
       if (results.slice(0, 3).some(r => matchesExpected(r.filepath, expectedDoc))) hits++;
     }
     expect(hits / easyQueries.length).toBeGreaterThanOrEqual(0.6);
@@ -222,7 +223,7 @@ describe("Vector Search", () => {
     const mediumQueries = evalQueries.filter(q => q.difficulty === "medium");
     let hits = 0;
     for (const { query, expectedDoc } of mediumQueries) {
-      const results = await store.searchVec(query, DEFAULT_EMBED_MODEL, 5);
+      const results = await store.searchVec(() => getQueryEmbedding(query, DEFAULT_EMBED_MODEL), 5);
       if (results.slice(0, 3).some(r => matchesExpected(r.filepath, expectedDoc))) hits++;
     }
     // Vector search should do better on semantic queries than BM25
@@ -235,7 +236,7 @@ describe("Vector Search", () => {
     const hardQueries = evalQueries.filter(q => q.difficulty === "hard");
     let hits = 0;
     for (const { query, expectedDoc } of hardQueries) {
-      const results = await store.searchVec(query, DEFAULT_EMBED_MODEL, 5);
+      const results = await store.searchVec(() => getQueryEmbedding(query, DEFAULT_EMBED_MODEL), 5);
       if (results.some(r => matchesExpected(r.filepath, expectedDoc))) hits++;
     }
     expect(hits / hardQueries.length).toBeGreaterThanOrEqual(0.3);
@@ -246,7 +247,7 @@ describe("Vector Search", () => {
 
     let hits = 0;
     for (const { query, expectedDoc } of evalQueries) {
-      const results = await store.searchVec(query, DEFAULT_EMBED_MODEL, 5);
+      const results = await store.searchVec(() => getQueryEmbedding(query, DEFAULT_EMBED_MODEL), 5);
       if (results.slice(0, 3).some(r => matchesExpected(r.filepath, expectedDoc))) hits++;
     }
     expect(hits / evalQueries.length).toBeGreaterThanOrEqual(0.5);
@@ -296,7 +297,7 @@ describe("Hybrid Search (RRF)", () => {
     }
 
     // Vector results
-    const vecResults = await store.searchVec(query, DEFAULT_EMBED_MODEL, 20);
+    const vecResults = await store.searchVec(() => getQueryEmbedding(query, DEFAULT_EMBED_MODEL), 20);
     if (vecResults.length > 0) {
       rankedLists.push(vecResults.map(r => ({
         file: r.filepath,
@@ -366,7 +367,7 @@ describe("Hybrid Search (RRF)", () => {
       if (bm25Results.slice(0, 3).some(r => matchesExpected(r.filepath, expectedDoc))) bm25Hits++;
 
       // Vector results for comparison
-      const vecResults = await store.searchVec(query, DEFAULT_EMBED_MODEL, 5);
+      const vecResults = await store.searchVec(() => getQueryEmbedding(query, DEFAULT_EMBED_MODEL), 5);
       if (vecResults.slice(0, 3).some(r => matchesExpected(r.filepath, expectedDoc))) vecHits++;
     }
 

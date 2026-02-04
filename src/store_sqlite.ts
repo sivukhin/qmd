@@ -999,6 +999,10 @@ function searchFTS(db: Database, query: string, limit: number = 20, collectionId
 // Vector Search
 // =============================================================================
 
+export async function getQueryEmbedding(text: string, model: string, session?: ILLMSession): Promise<number[] | null> {
+  return await getEmbedding(text, model, true, session);
+}
+
 async function getEmbedding(text: string, model: string, isQuery: boolean, session?: ILLMSession): Promise<number[] | null> {
   // Format text using the appropriate prompt template
   const formattedText = isQuery ? formatQueryForEmbedding(text) : formatDocForEmbedding(text);
@@ -1008,11 +1012,11 @@ async function getEmbedding(text: string, model: string, isQuery: boolean, sessi
   return result?.embedding || null;
 }
 
-async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession): Promise<SearchResult[]> {
+async function searchVec(db: Database, generate: () => Promise<number[] | null>, limit: number = 20, collectionName?: string): Promise<SearchResult[]> {
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
   if (!tableExists) return [];
 
-  const embedding = await getEmbedding(query, model, true, session);
+  const embedding = await generate();
   if (!embedding) return [];
 
   // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
@@ -1523,7 +1527,7 @@ export function createStore(dbPath?: string): Store {
 
     // Search
     searchFTS: (query: string, limit?: number, collectionId?: number) => searchFTS(db, query, limit, collectionId),
-    searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession) => searchVec(db, query, model, limit, collectionName, session),
+    searchVec: (generate: () => Promise<number[] | null>, limit?: number, collectionName?: string) => searchVec(db, generate, limit, collectionName),
 
     // Query expansion & reranking
     expandQuery: (query: string, model?: string) => expandQuery(query, model, db),

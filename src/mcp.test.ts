@@ -187,6 +187,7 @@ import {
   type Store,
 } from "./store";
 import type { RankedResult } from "./store";
+import { getQueryEmbedding } from "./store_sqlite";
 // Note: searchResultsToMcpCsv no longer used in MCP - using structuredContent instead
 
 // =============================================================================
@@ -229,7 +230,7 @@ describe("MCP Server", () => {
     testStore.close();
     try {
       require("fs").unlinkSync(testDbPath);
-    } catch {}
+    } catch { }
 
     // Clean up test config directory
     try {
@@ -238,7 +239,7 @@ describe("MCP Server", () => {
         await unlink(join(testConfigDir, file));
       }
       await rmdir(testConfigDir);
-    } catch {}
+    } catch { }
 
     delete process.env.QMD_CONFIG_DIR;
   });
@@ -249,30 +250,30 @@ describe("MCP Server", () => {
 
   describe("qmd_search tool", () => {
     test("returns results for matching query", () => {
-      const results = testStore.searchFTS( "readme", 10);
+      const results = testStore.searchFTS("readme", 10);
       expect(results.length).toBeGreaterThan(0);
       expect(results[0]!.displayPath).toBe("docs/readme.md");
     });
 
     test("returns empty for non-matching query", () => {
-      const results = testStore.searchFTS( "xyznonexistent", 10);
+      const results = testStore.searchFTS("xyznonexistent", 10);
       expect(results.length).toBe(0);
     });
 
     test("respects limit parameter", () => {
-      const results = testStore.searchFTS( "meeting", 1);
+      const results = testStore.searchFTS("meeting", 1);
       expect(results.length).toBe(1);
     });
 
     // Note: Collection filtering tests removed - collections are now managed in YAML, not DB
 
     test("formats results as structured content", () => {
-      const results = testStore.searchFTS( "api", 10);
+      const results = testStore.searchFTS("api", 10);
       const filtered = results.map(r => ({
         file: r.displayPath,
         title: r.title,
         score: Math.round(r.score * 100) / 100,
-        context: testStore.getContextForFile( r.filepath),
+        context: testStore.getContextForFile(r.filepath),
         snippet: extractSnippet(r.body || "", "api", 300, r.chunkPos).snippet,
       }));
       // MCP now returns structuredContent with results array
@@ -290,12 +291,12 @@ describe("MCP Server", () => {
 
   describe("qmd_vsearch tool", () => {
     test("returns results for semantic query", async () => {
-      const results = await testStore.searchVec( "project documentation", DEFAULT_EMBED_MODEL, 10);
+      const results = await testStore.searchVec(() => getQueryEmbedding("project documentation", DEFAULT_EMBED_MODEL), 10);
       expect(results.length).toBeGreaterThan(0);
     });
 
     test("respects limit parameter", async () => {
-      const results = await testStore.searchVec( "documentation", DEFAULT_EMBED_MODEL, 2);
+      const results = await testStore.searchVec(() => getQueryEmbedding("documentation", DEFAULT_EMBED_MODEL), 2);
       expect(results.length).toBeLessThanOrEqual(2);
     });
 
@@ -304,7 +305,7 @@ describe("MCP Server", () => {
       initTestDatabase(emptyStore.db);
       emptyStore.db.exec("DROP TABLE IF EXISTS vectors_vec");
 
-      const results = await emptyStore.searchVec("test", DEFAULT_EMBED_MODEL, 10);
+      const results = await emptyStore.searchVec(() => getQueryEmbedding("test", DEFAULT_EMBED_MODEL), 10);
       expect(results.length).toBe(0);
       emptyStore.close();
     });
@@ -356,7 +357,7 @@ describe("MCP Server", () => {
 
       const rankedLists: RankedResult[][] = [];
       for (const q of queries) {
-        const ftsResults = testStore.searchFTS( q, 20);
+        const ftsResults = testStore.searchFTS(q, 20);
         if (ftsResults.length > 0) {
           rankedLists.push(ftsResults.map(r => ({
             file: r.filepath,
@@ -390,29 +391,29 @@ describe("MCP Server", () => {
 
   describe("qmd_get tool", () => {
     test("retrieves document by display_path", () => {
-      const meta = testStore.findDocument( "readme.md", { includeBody: false });
+      const meta = testStore.findDocument("readme.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody( meta) ?? "";
+      const body = testStore.getDocumentBody(meta) ?? "";
 
       expect(meta.displayPath).toBe("docs/readme.md");
       expect(body).toContain("Project README");
     });
 
     test("retrieves document by filepath", () => {
-      const meta = testStore.findDocument( "/test/docs/api.md", { includeBody: false });
+      const meta = testStore.findDocument("/test/docs/api.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
       expect(meta.title).toBe("API Documentation");
     });
 
     test("retrieves document by partial path", () => {
-      const result = testStore.findDocument( "api.md", { includeBody: false });
+      const result = testStore.findDocument("api.md", { includeBody: false });
       expect("error" in result).toBe(false);
     });
 
     test("returns not found for missing document", () => {
-      const result = testStore.findDocument( "nonexistent.md", { includeBody: false });
+      const result = testStore.findDocument("nonexistent.md", { includeBody: false });
       expect("error" in result).toBe(true);
       if ("error" in result) {
         expect(result.error).toBe("not_found");
@@ -420,7 +421,7 @@ describe("MCP Server", () => {
     });
 
     test("suggests similar files when not found", () => {
-      const result = testStore.findDocument( "readm.md", { includeBody: false }); // typo
+      const result = testStore.findDocument("readm.md", { includeBody: false }); // typo
       expect("error" in result).toBe(true);
       if ("error" in result) {
         expect(result.similarFiles.length).toBeGreaterThanOrEqual(0);
@@ -428,33 +429,33 @@ describe("MCP Server", () => {
     });
 
     test("supports line range with :line suffix", () => {
-      const meta = testStore.findDocument( "readme.md:2", { includeBody: false });
+      const meta = testStore.findDocument("readme.md:2", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody( meta, 2, 2) ?? "";
+      const body = testStore.getDocumentBody(meta, 2, 2) ?? "";
       const lines = body.split("\n");
       expect(lines.length).toBeLessThanOrEqual(2);
     });
 
     test("supports fromLine parameter", () => {
-      const meta = testStore.findDocument( "readme.md", { includeBody: false });
+      const meta = testStore.findDocument("readme.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody( meta, 3) ?? "";
+      const body = testStore.getDocumentBody(meta, 3) ?? "";
       expect(body).not.toContain("# Project README");
     });
 
     test("supports maxLines parameter", () => {
-      const meta = testStore.findDocument( "api.md", { includeBody: false });
+      const meta = testStore.findDocument("api.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody( meta, 1, 3) ?? "";
+      const body = testStore.getDocumentBody(meta, 1, 3) ?? "";
       const lines = body.split("\n");
       expect(lines.length).toBeLessThanOrEqual(3);
     });
 
     test("includes context for documents in context path", () => {
-      const result = testStore.findDocument( "meetings/meeting-2024-01.md", { includeBody: false });
+      const result = testStore.findDocument("meetings/meeting-2024-01.md", { includeBody: false });
       expect("error" in result).toBe(false);
       if ("error" in result) return;
       expect(result.context).toBe("Meeting notes and transcripts");
@@ -467,7 +468,7 @@ describe("MCP Server", () => {
 
   describe("qmd_multi_get tool", () => {
     test("retrieves multiple documents by glob pattern", () => {
-      const { docs, errors } = testStore.findDocuments( "meetings/*.md", { includeBody: true });
+      const { docs, errors } = testStore.findDocuments("meetings/*.md", { includeBody: true });
       expect(errors.length).toBe(0);
       expect(docs.length).toBe(2);
       const paths = docs.map(d => d.doc.displayPath);
@@ -476,20 +477,20 @@ describe("MCP Server", () => {
     });
 
     test("retrieves documents by comma-separated list", () => {
-      const { docs, errors } = testStore.findDocuments( "readme.md, api.md", { includeBody: true });
+      const { docs, errors } = testStore.findDocuments("readme.md, api.md", { includeBody: true });
       expect(errors.length).toBe(0);
       expect(docs.length).toBe(2);
     });
 
     test("returns errors for missing files in comma list", () => {
-      const { docs, errors } = testStore.findDocuments( "readme.md, nonexistent.md", { includeBody: true });
+      const { docs, errors } = testStore.findDocuments("readme.md, nonexistent.md", { includeBody: true });
       expect(docs.length).toBe(1);
       expect(errors.length).toBe(1);
       expect(errors[0]).toContain("not found");
     });
 
     test("skips files larger than maxBytes", () => {
-      const { docs } = testStore.findDocuments( "*.md", { includeBody: true, maxBytes: 1000 }); // 1KB limit
+      const { docs } = testStore.findDocuments("*.md", { includeBody: true, maxBytes: 1000 }); // 1KB limit
       const large = docs.find(d => d.doc.displayPath === "docs/large-file.md");
       expect(large).toBeDefined();
       expect(large?.skipped).toBe(true);
@@ -497,7 +498,7 @@ describe("MCP Server", () => {
     });
 
     test("respects maxLines parameter", () => {
-      const { docs } = testStore.findDocuments( "readme.md", { includeBody: true, maxBytes: DEFAULT_MULTI_GET_MAX_BYTES });
+      const { docs } = testStore.findDocuments("readme.md", { includeBody: true, maxBytes: DEFAULT_MULTI_GET_MAX_BYTES });
       expect(docs.length).toBe(1);
       const d = docs[0]!;
       expect(d.skipped).toBe(false);
@@ -510,14 +511,14 @@ describe("MCP Server", () => {
     });
 
     test("returns error for non-matching glob", () => {
-      const { docs, errors } = testStore.findDocuments( "nonexistent/*.md", { includeBody: true });
+      const { docs, errors } = testStore.findDocuments("nonexistent/*.md", { includeBody: true });
       expect(docs.length).toBe(0);
       expect(errors.length).toBe(1);
       expect(errors[0]).toContain("No files matched");
     });
 
     test("includes context in results", () => {
-      const { docs } = testStore.findDocuments( "meetings/meeting-2024-01.md", { includeBody: true });
+      const { docs } = testStore.findDocuments("meetings/meeting-2024-01.md", { includeBody: true });
       expect(docs.length).toBe(1);
       const d = docs[0]!;
       expect(d.skipped).toBe(false);
@@ -641,7 +642,7 @@ describe("MCP Server", () => {
       `).get(path) as { filepath: string; display_path: string; body: string } | null;
 
       expect(doc).not.toBeNull();
-      const context = testStore.getContextForFile( doc!.filepath);
+      const context = testStore.getContextForFile(doc!.filepath);
       expect(context).toBe("Meeting notes and transcripts");
 
       // Verify context would be prepended
@@ -760,29 +761,29 @@ QMD is your on-device search engine for markdown knowledge bases.`;
 
   describe("edge cases", () => {
     test("handles empty query", () => {
-      const results = testStore.searchFTS( "", 10);
+      const results = testStore.searchFTS("", 10);
       expect(results.length).toBe(0);
     });
 
     test("handles special characters in query", () => {
-      const results = testStore.searchFTS( "project's", 10);
+      const results = testStore.searchFTS("project's", 10);
       // Should not throw
       expect(Array.isArray(results)).toBe(true);
     });
 
     test("handles unicode in query", () => {
-      const results = testStore.searchFTS( "文档", 10);
+      const results = testStore.searchFTS("文档", 10);
       expect(Array.isArray(results)).toBe(true);
     });
 
     test("handles very long query", () => {
       const longQuery = "documentation ".repeat(100);
-      const results = testStore.searchFTS( longQuery, 10);
+      const results = testStore.searchFTS(longQuery, 10);
       expect(Array.isArray(results)).toBe(true);
     });
 
     test("handles query with only stopwords", () => {
-      const results = testStore.searchFTS( "the and or", 10);
+      const results = testStore.searchFTS("the and or", 10);
       expect(Array.isArray(results)).toBe(true);
     });
 
@@ -816,12 +817,12 @@ QMD is your on-device search engine for markdown knowledge bases.`;
     });
 
     test("search results have correct structure for structuredContent", () => {
-      const results = testStore.searchFTS( "readme", 5);
+      const results = testStore.searchFTS("readme", 5);
       const structured = results.map(r => ({
         file: r.displayPath,
         title: r.title,
         score: Math.round(r.score * 100) / 100,
-        context: testStore.getContextForFile( r.filepath),
+        context: testStore.getContextForFile(r.filepath),
         snippet: extractSnippet(r.body || "", "readme", 300, r.chunkPos).snippet,
       }));
 
@@ -847,10 +848,10 @@ QMD is your on-device search engine for markdown knowledge bases.`;
 
     test("embedded resources include name and title", () => {
       // Simulate what qmd_get returns
-      const meta = testStore.findDocument( "readme.md", { includeBody: false });
+      const meta = testStore.findDocument("readme.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody( meta) ?? "";
+      const body = testStore.getDocumentBody(meta) ?? "";
       const resource = {
         uri: `qmd://${meta.displayPath}`,
         name: meta.displayPath,

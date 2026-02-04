@@ -186,7 +186,7 @@ export type Store = {
 
   // Search
   searchFTS: (query: string, limit?: number, collectionId?: number) => SearchResult[];
-  searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession) => Promise<SearchResult[]>;
+  searchVec: (generate: () => Promise<number[] | null>, limit?: number, collectionName?: string) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
   expandQuery: (query: string, model?: string) => Promise<string[]>;

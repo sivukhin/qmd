@@ -21,6 +21,7 @@ import {
   DEFAULT_MULTI_GET_MAX_BYTES,
 } from "./store.js";
 import type { RankedResult } from "./store.js";
+import { getQueryEmbedding } from "./store_sqlite.js";
 
 // =============================================================================
 // Types for structured content
@@ -323,7 +324,7 @@ You can also access documents directly via the \`qmd://\` URI scheme:
       // Collect results (filter by collection after search)
       const allResults = new Map<string, { file: string; displayPath: string; title: string; body: string; score: number; docid: string }>();
       for (const q of queries) {
-        const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, limit || 10)
+        const vecResults = await store.searchVec(() => getQueryEmbedding(q, DEFAULT_EMBED_MODEL), limit || 10)
           .then(results => results.filter(r => !collection || r.collectionName === collection));
         for (const r of vecResults) {
           const existing = allResults.get(r.filepath);
@@ -389,7 +390,7 @@ You can also access documents directly via the \`qmd://\` URI scheme:
           rankedLists.push(ftsResults.map(r => ({ file: r.filepath, displayPath: r.displayPath, title: r.title, body: r.body || "", score: r.score })));
         }
         if (hasVectors) {
-          const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, 20)
+          const vecResults = await store.searchVec(() => getQueryEmbedding(q, DEFAULT_EMBED_MODEL), 20)
             .then(results => results.filter(r => !collection || r.collectionName === collection));
           if (vecResults.length > 0) {
             for (const r of vecResults) docidMap.set(r.filepath, r.docid);

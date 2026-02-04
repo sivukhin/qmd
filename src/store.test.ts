@@ -41,6 +41,7 @@ import {
   type RankedResult,
 } from "./store.js";
 import type { CollectionConfig } from "./collections.js";
+import { getQueryEmbedding } from "./store_sqlite.js";
 
 // =============================================================================
 // LlamaCpp Setup
@@ -1782,7 +1783,7 @@ describe("LlamaCpp Integration", () => {
     });
 
     // No vectors_vec table exists, should return empty
-    const results = await store.searchVec("query", "embeddinggemma", 10);
+    const results = await store.searchVec(() => getQueryEmbedding("query", "embeddinggemma"), 10);
     expect(results).toHaveLength(0);
 
     await cleanupTestDb(store);
@@ -1807,7 +1808,7 @@ describe("LlamaCpp Integration", () => {
     store.db.prepare(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`).run(hash, new Date().toISOString());
     store.db.prepare(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(`${hash}_0`, new Float32Array(embedding));
 
-    const results = await store.searchVec("test query", "embeddinggemma", 10);
+    const results = await store.searchVec(() => getQueryEmbedding("test query", "embeddinggemma"), 10);
     expect(results).toHaveLength(1);
     expect(results[0]!.displayPath).toBe(`${collectionName}/doc1.md`);
     expect(results[0]!.filepath).toBe(`qmd://${collectionName}/doc1.md`);
@@ -1846,11 +1847,11 @@ describe("LlamaCpp Integration", () => {
     store.db.prepare(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(`${hash2}_0`, new Float32Array(embedding2));
 
     // Search without filter - should return both
-    const allResults = await store.searchVec("content", "embeddinggemma", 10);
+    const allResults = await store.searchVec(() => getQueryEmbedding("content", "embeddinggemma"), 10);
     expect(allResults).toHaveLength(2);
 
     // Search with collection filter - should return only from collection1
-    const filtered = await store.searchVec("content", "embeddinggemma", 10, collection1);
+    const filtered = await store.searchVec(() => getQueryEmbedding("content", "embeddinggemma"), 10, collection1);
     expect(filtered).toHaveLength(1);
     expect(filtered[0]!.collectionName).toBe(collection1);
 
@@ -1882,7 +1883,7 @@ describe("LlamaCpp Integration", () => {
     // This should complete quickly (not hang) due to the two-step fix
     // The old code with JOINs in the sqlite-vec query would hang indefinitely
     const startTime = Date.now();
-    const results = await store.searchVec("test content", "embeddinggemma", 5);
+    const results = await store.searchVec(() => getQueryEmbedding("test content", "embeddinggemma"), 5);
     const elapsed = Date.now() - startTime;
 
     // If the query took more than 5 seconds, something is wrong

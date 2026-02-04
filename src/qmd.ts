@@ -54,6 +54,7 @@ import {
   listAllContexts,
   setConfigIndexName,
 } from "./collections.js";
+import { getQueryEmbedding } from "./store_sqlite.js";
 
 // Enable production mode - allows using default database path
 // Tests must set INDEX_PATH or use createStore() with explicit path
@@ -1961,7 +1962,7 @@ async function vectorSearch(query: string, opts: OutputOptions, model: string = 
     // are made. This is a known limitation of the LlamaEmbeddingContext.
     // See: https://github.com/tobi/qmd/pull/23
     for (const q of vectorQueries) {
-      const vecResults = await store.searchVec(q, model, perQueryLimit, collectionName as any, session);
+      const vecResults = await store.searchVec(() => getQueryEmbedding(q, model, session), perQueryLimit, collectionName as any);
       for (const r of vecResults) {
         const existing = allResults.get(r.filepath);
         if (!existing || r.score > existing.score) {
@@ -2112,7 +2113,7 @@ async function querySearch(query: string, opts: OutputOptions, embedModel: strin
       for (const q of vectorQueries) {
         if (!q) continue;
         searchPromises.push((async () => {
-          const vecResults = await store.searchVec(q, embedModel, 20, (collectionName || "") as any, session);
+          const vecResults = await store.searchVec(() => getQueryEmbedding(q, embedModel, session), 20, (collectionName || "") as any);
           if (vecResults.length > 0) {
             for (const r of vecResults) hashMap.set(r.filepath, r.hash);
             rankedLists.push(vecResults.map(r => ({ file: r.filepath, displayPath: r.displayPath, title: r.title, body: r.body || "", score: r.score })));
