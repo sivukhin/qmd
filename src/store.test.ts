@@ -76,7 +76,7 @@ async function createTestStore(): Promise<Store> {
     YAML.stringify(emptyConfig)
   );
 
-  return createStore(testDbPath, { dbName: 'turso' });
+  return createStore(testDbPath, { engine: 'turso' });
 }
 
 async function cleanupTestDb(store: Store): Promise<void> {
@@ -426,7 +426,7 @@ describe("Store Creation", () => {
     expect(tableNames).toContain("documents");
     expect(tableNames).toContain("content_vectors");
     expect(tableNames).toContain("llm_cache");
-    if (store.db.name == 'sqlite3') {
+    if (store.db.engine == 'sqlite3') {
       expect(tableNames).toContain("documents_fts");
     }
 
@@ -1623,7 +1623,7 @@ describe("Fuzzy Matching", () => {
 describe("Vector Table", () => {
   test("ensureVecTable creates vector table", async () => {
     const store = await createTestStore();
-    if (store.db.name == 'turso') {
+    if (store.db.engine == 'turso') {
       return;
     }
 
@@ -1646,7 +1646,7 @@ describe("Vector Table", () => {
 
   test("ensureVecTable recreates table if dimensions change", async () => {
     const store = await createTestStore();
-    if (store.db.name == 'turso') {
+    if (store.db.engine == 'turso') {
       return;
     }
 

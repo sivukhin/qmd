@@ -145,11 +145,11 @@ export type SnippetResult = {
 // =============================================================================
 
 export type StoreOptions = {
-  dbName: string
+  engine: 'sqlite3' | 'turso';
 }
 
 export type StoreDb = {
-  name: 'sqlite3' | 'turso';
+  engine: 'sqlite3' | 'turso';
   db: any;
   exec(query: string, ...params: any): Promise<{ lastInsertRowid: number }>;
   get(query: string, ...params: any): Promise<any>;

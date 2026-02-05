@@ -1474,7 +1474,7 @@ export function createSqliteStore(dbPath?: string): Store {
 
   return {
     db: {
-      name: 'sqlite3',
+      engine: 'sqlite3',
       db: db,
       async exec(query, ...params) {
         const result = db.run(query, ...params);

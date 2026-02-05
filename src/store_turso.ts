@@ -1217,7 +1217,7 @@ export async function createTursoStore(db: TursoDatabase, dbPath: string = ":mem
 
   return {
     db: {
-      name: 'turso',
+      engine: 'turso',
       db: db,
       async exec(query, ...params) { return await db.prepare(query).run(...params); },
       async get(query, ...params) { return await db.prepare(query).get(...params); },

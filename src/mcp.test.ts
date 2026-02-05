@@ -32,7 +32,7 @@ afterAll(async () => {
 });
 
 async function initTestDatabase(db: StoreDb): Promise<void> {
-  if (db.name == 'sqlite3') {
+  if (db.engine == 'sqlite3') {
     sqliteVec.load(db.db);
   }
   await db.exec("PRAGMA journal_mode = WAL");

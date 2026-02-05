@@ -17,8 +17,8 @@
  *   - store.ts: This file - imports and re-exports all public APIs
  */
 
-import { connectTursoDb, createTursoStore } from "./store_turso";
-import { createSqliteStore } from "./store_sqlite";
+import { connectTursoDb, createTursoStore, enableProductionMode as tursoProdMode, getDefaultDbPath as tursoDbPath } from "./store_turso";
+import { createSqliteStore, enableProductionMode as sqliteProdMode, getDefaultDbPath as sqliteDbPath } from "./store_sqlite";
 import type { Store, StoreOptions } from "./store_types";
 
 // =============================================================================
@@ -99,15 +99,6 @@ export {
 } from "./store_util";
 
 // =============================================================================
-// Re-export SQLite implementation
-// =============================================================================
-
-export {
-  enableProductionMode,
-  getDefaultDbPath,
-} from "./store_sqlite";
-
-// =============================================================================
 // Re-export LLM formatting functions (for backward compatibility)
 // =============================================================================
 
@@ -122,8 +113,21 @@ export {
   type TursoDatabase,
 } from "./store_turso";
 
+let DbEngine: string = 'sqlite3';
+
+export function enableProductionMode() {
+  let engine = process.env.DB_ENGINE ?? DbEngine;
+  if (engine == 'turso') { tursoProdMode(); } else { sqliteProdMode(); }
+}
+
+export function getDefaultDbPath(indexName: string = "index"): string {
+  let engine = process.env.DB_ENGINE ?? DbEngine;
+  if (engine == 'turso') { return tursoDbPath(indexName); } else { return sqliteDbPath(indexName); }
+}
+
 export async function createStore(dbPath?: string, options?: StoreOptions): Promise<Store> {
-  if (options?.dbName == 'turso') {
+  const dbName = options?.engine ?? process.env.DB_ENGINE ?? DbEngine;
+  if (dbName == 'turso') {
     const { db, path } = await connectTursoDb(dbPath);
     return createTursoStore(db, path);
   } else {

@@ -2609,7 +2609,7 @@ if (import.meta.main) {
       const store = await getStore();
 
       // 1. Clear llm_cache
-      const cacheCount = store.deleteLLMCache();
+      const cacheCount = await store.deleteLLMCache();
       console.log(`${c.green}✓${c.reset} Cleared ${cacheCount} cached API responses`);
 
       // 2. Remove orphaned vectors
