@@ -29,6 +29,7 @@ import {
 } from "./store";
 import { getDefaultLlamaCpp, formatDocForEmbedding, disposeDefaultLlamaCpp } from "./llm";
 import { getQueryEmbedding } from "./store_util";
+import type { StoreDb } from "./store_types";
 
 // Eval queries with expected documents
 const evalQueries: {
@@ -76,14 +77,14 @@ function matchesExpected(filepath: string, expectedDoc: string): boolean {
 }
 
 // Helper to calculate hit rate
-function calcHitRate(
+async function calcHitRate(
   queries: typeof evalQueries,
-  searchFn: (query: string) => { filepath: string }[],
+  searchFn: (query: string) => Promise<{ filepath: string }[]>,
   topK: number
-): number {
+): Promise<number> {
   let hits = 0;
   for (const { query, expectedDoc } of queries) {
-    const results = searchFn(query).slice(0, topK);
+    const results = (await searchFn(query)).slice(0, topK);
     if (results.some(r => matchesExpected(r.filepath, expectedDoc))) hits++;
   }
   return hits / queries.length;
@@ -96,7 +97,7 @@ function calcHitRate(
 describe("BM25 Search (FTS)", () => {
   let store: ReturnType<typeof createStore>;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     store = createStore();
 
     // Load and index eval documents
@@ -109,8 +110,8 @@ describe("BM25 Search (FTS)", () => {
       const hash = Bun.hash(content).toString(16).slice(0, 12);
       const now = new Date().toISOString();
 
-      store.insertContent(hash, content, now);
-      store.insertDocument("eval-docs", file, title, hash, now, now);
+      await store.insertContent(hash, content, now);
+      await store.insertDocument("eval-docs", file, title, hash, now, now);
     }
   });
 
@@ -118,26 +119,26 @@ describe("BM25 Search (FTS)", () => {
     store.close();
   });
 
-  test("easy queries: ≥80% Hit@3", () => {
+  test("easy queries: ≥80% Hit@3", async () => {
     const easyQueries = evalQueries.filter(q => q.difficulty === "easy");
-    const hitRate = calcHitRate(easyQueries, q => store.searchFTS(q, 5), 3);
+    const hitRate = await calcHitRate(easyQueries, q => store.searchFTS(q, 5), 3);
     expect(hitRate).toBeGreaterThanOrEqual(0.8);
   });
 
-  test("medium queries: ≥15% Hit@3 (BM25 struggles with semantic)", () => {
+  test("medium queries: ≥15% Hit@3 (BM25 struggles with semantic)", async () => {
     const mediumQueries = evalQueries.filter(q => q.difficulty === "medium");
-    const hitRate = calcHitRate(mediumQueries, q => store.searchFTS(q, 5), 3);
+    const hitRate = await calcHitRate(mediumQueries, q => store.searchFTS(q, 5), 3);
     expect(hitRate).toBeGreaterThanOrEqual(0.15);
   });
 
-  test("hard queries: ≥15% Hit@5 (BM25 baseline)", () => {
+  test("hard queries: ≥15% Hit@5 (BM25 baseline)", async () => {
     const hardQueries = evalQueries.filter(q => q.difficulty === "hard");
-    const hitRate = calcHitRate(hardQueries, q => store.searchFTS(q, 5), 5);
+    const hitRate = await calcHitRate(hardQueries, q => store.searchFTS(q, 5), 5);
     expect(hitRate).toBeGreaterThanOrEqual(0.15);
   });
 
-  test("overall Hit@3 ≥40% (BM25 baseline)", () => {
-    const hitRate = calcHitRate(evalQueries, q => store.searchFTS(q, 5), 3);
+  test("overall Hit@3 ≥40% (BM25 baseline)", async () => {
+    const hitRate = await calcHitRate(evalQueries, q => store.searchFTS(q, 5), 3);
     expect(hitRate).toBeGreaterThanOrEqual(0.4);
   });
 });
@@ -148,7 +149,7 @@ describe("BM25 Search (FTS)", () => {
 
 describe("Vector Search", () => {
   let store: ReturnType<typeof createStore>;
-  let db: Database;
+  let db: StoreDb;
   let hasEmbeddings = false;
 
   beforeAll(async () => {
@@ -156,12 +157,12 @@ describe("Vector Search", () => {
     db = store.db;
 
     // Check if embeddings already exist (from previous test run)
-    const vecTable = db.prepare(
+    const vecTable = await db.get(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
-    ).get();
+    );
 
     if (vecTable) {
-      const count = db.prepare(`SELECT COUNT(*) as cnt FROM vectors_vec`).get() as { cnt: number };
+      const count = await db.get(`SELECT COUNT(*) as cnt FROM vectors_vec`) as { cnt: number };
       if (count.cnt > 0) {
         hasEmbeddings = true;
         return;
@@ -170,7 +171,7 @@ describe("Vector Search", () => {
 
     // Generate embeddings for test documents
     const llm = getDefaultLlamaCpp();
-    store.ensureVecTable(768); // embeddinggemma uses 768 dimensions
+    await store.ensureVecTable(768); // embeddinggemma uses 768 dimensions
 
     const evalDocsDir = join(import.meta.dir, "../test/eval-docs");
     const files = readdirSync(evalDocsDir).filter(f => f.endsWith(".md"));
@@ -191,7 +192,7 @@ describe("Vector Search", () => {
           // Convert to Float32Array for sqlite-vec
           const embedding = new Float32Array(result.embedding);
           const now = new Date().toISOString();
-          store.insertEmbedding(hash, seq, chunk.pos, embedding, DEFAULT_EMBED_MODEL, now);
+          await store.insertEmbedding(hash, seq, chunk.pos, embedding, DEFAULT_EMBED_MODEL, now);
         }
       }
     }
@@ -260,18 +261,18 @@ describe("Vector Search", () => {
 
 describe("Hybrid Search (RRF)", () => {
   let store: ReturnType<typeof createStore>;
-  let db: Database;
+  let db: StoreDb;
   let hasVectors = false;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     store = createStore();
     db = store.db;
     // Check if vectors exist
-    const vecTable = db.prepare(
+    const vecTable = await db.get(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
-    ).get();
+    );
     if (vecTable) {
-      const count = db.prepare(`SELECT COUNT(*) as cnt FROM vectors_vec`).get() as { cnt: number };
+      const count = await db.get(`SELECT COUNT(*) as cnt FROM vectors_vec`) as { cnt: number };
       hasVectors = count.cnt > 0;
     }
   });
@@ -285,7 +286,7 @@ describe("Hybrid Search (RRF)", () => {
     const rankedLists: RankedResult[][] = [];
 
     // FTS results
-    const ftsResults = store.searchFTS(query, 20);
+    const ftsResults = await store.searchFTS(query, 20);
     if (ftsResults.length > 0) {
       rankedLists.push(ftsResults.map(r => ({
         file: r.filepath,
@@ -363,7 +364,7 @@ describe("Hybrid Search (RRF)", () => {
       if (hybridResults.slice(0, 3).some(r => matchesExpected(r.file, expectedDoc))) hybridHits++;
 
       // BM25 results for comparison
-      const bm25Results = store.searchFTS(query, 5);
+      const bm25Results = await store.searchFTS(query, 5);
       if (bm25Results.slice(0, 3).some(r => matchesExpected(r.filepath, expectedDoc))) bm25Hits++;
 
       // Vector results for comparison

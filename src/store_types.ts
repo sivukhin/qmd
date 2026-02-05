@@ -144,48 +144,54 @@ export type SnippetResult = {
 // Store Interface
 // =============================================================================
 
-import type { ILLMSession } from "./llm";
+export type StoreDb = {
+  name: 'sqlite3' | 'turso';
+  db: any;
+  exec(query: string, ...params: any): Promise<{ lastInsertRowid: number }>;
+  get(query: string, ...params: any): Promise<any>;
+  all(query: string, ...params: any): Promise<any[]>;
+}
 
 export type Store = {
-  db: Database;
+  db: StoreDb;
   dbPath: string;
   close: () => void;
-  ensureVecTable: (dimensions: number) => void;
+  ensureVecTable: (dimensions: number) => Promise<void>;
 
   // Index health
-  getHashesNeedingEmbedding: () => number;
-  getIndexHealth: () => IndexHealthInfo;
-  getStatus: () => IndexStatus;
+  getHashesNeedingEmbedding: () => Promise<number>;
+  getIndexHealth: () => Promise<IndexHealthInfo>;
+  getStatus: () => Promise<IndexStatus>;
 
-  // Caching
+  // Caching (getCacheKey is sync - pure computation)
   getCacheKey: (url: string, body: object) => string;
-  getCachedResult: (cacheKey: string) => string | null;
-  setCachedResult: (cacheKey: string, result: string) => void;
-  clearCache: () => void;
+  getCachedResult: (cacheKey: string) => Promise<string | null>;
+  setCachedResult: (cacheKey: string, result: string) => Promise<void>;
+  clearCache: () => Promise<void>;
 
   // Cleanup and maintenance
-  deleteLLMCache: () => number;
-  deleteInactiveDocuments: () => number;
-  cleanupOrphanedContent: () => number;
-  cleanupOrphanedVectors: () => number;
-  vacuumDatabase: () => void;
+  deleteLLMCache: () => Promise<number>;
+  deleteInactiveDocuments: () => Promise<number>;
+  cleanupOrphanedContent: () => Promise<number>;
+  cleanupOrphanedVectors: () => Promise<number>;
+  vacuumDatabase: () => Promise<void>;
 
   // Context
-  getContextForFile: (filepath: string) => string | null;
-  getContextForPath: (collectionName: string, path: string) => string | null;
+  getContextForFile: (filepath: string) => Promise<string | null>;
+  getContextForPath: (collectionName: string, path: string) => Promise<string | null>;
   getCollectionByName: (name: string) => { name: string; pwd: string; glob_pattern: string } | null;
-  getCollectionsWithoutContext: () => { name: string; pwd: string; doc_count: number }[];
-  getTopLevelPathsWithoutContext: (collectionName: string) => string[];
+  getCollectionsWithoutContext: () => Promise<{ name: string; pwd: string; doc_count: number }[]>;
+  getTopLevelPathsWithoutContext: (collectionName: string) => Promise<string[]>;
 
-  // Virtual paths
+  // Virtual paths (sync - pure computation, no DB access)
   parseVirtualPath: (virtualPath: string) => VirtualPath | null;
   buildVirtualPath: (collectionName: string, path: string) => string;
   isVirtualPath: (path: string) => boolean;
   resolveVirtualPath: (virtualPath: string) => string | null;
-  toVirtualPath: (absolutePath: string) => string | null;
+  toVirtualPath: (absolutePath: string) => Promise<string | null>;
 
   // Search
-  searchFTS: (query: string, limit?: number, collectionId?: number) => SearchResult[];
+  searchFTS: (query: string, limit?: number, collectionId?: number) => Promise<SearchResult[]>;
   searchVec: (generate: () => Promise<number[] | null>, limit?: number, collectionName?: string) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
@@ -193,38 +199,38 @@ export type Store = {
   rerank: (query: string, documents: { file: string; text: string }[], model?: string) => Promise<{ file: string; score: number }[]>;
 
   // Document retrieval
-  findDocument: (filename: string, options?: { includeBody?: boolean }) => DocumentResult | DocumentNotFound;
-  getDocumentBody: (doc: DocumentResult | { filepath: string }, fromLine?: number, maxLines?: number) => string | null;
-  findDocuments: (pattern: string, options?: { includeBody?: boolean; maxBytes?: number }) => { docs: MultiGetResult[]; errors: string[] };
+  findDocument: (filename: string, options?: { includeBody?: boolean }) => Promise<DocumentResult | DocumentNotFound>;
+  getDocumentBody: (doc: DocumentResult | { filepath: string }, fromLine?: number, maxLines?: number) => Promise<string | null>;
+  findDocuments: (pattern: string, options?: { includeBody?: boolean; maxBytes?: number }) => Promise<{ docs: MultiGetResult[]; errors: string[] }>;
 
   // Fuzzy matching and docid lookup
-  findSimilarFiles: (query: string, maxDistance?: number, limit?: number) => string[];
-  matchFilesByGlob: (pattern: string) => { filepath: string; displayPath: string; bodyLength: number }[];
-  findDocumentByDocid: (docid: string) => { filepath: string; hash: string } | null;
+  findSimilarFiles: (query: string, maxDistance?: number, limit?: number) => Promise<string[]>;
+  matchFilesByGlob: (pattern: string) => Promise<{ filepath: string; displayPath: string; bodyLength: number }[]>;
+  findDocumentByDocid: (docid: string) => Promise<{ filepath: string; hash: string } | null>;
 
   // Document indexing operations
-  insertContent: (hash: string, content: string, createdAt: string) => void;
-  insertDocument: (collectionName: string, path: string, title: string, hash: string, createdAt: string, modifiedAt: string) => void;
-  findActiveDocument: (collectionName: string, path: string) => { id: number; hash: string; title: string } | null;
-  updateDocumentTitle: (documentId: number, title: string, modifiedAt: string) => void;
-  updateDocument: (documentId: number, title: string, hash: string, modifiedAt: string) => void;
-  deactivateDocument: (collectionName: string, path: string) => void;
-  getActiveDocumentPaths: (collectionName: string) => string[];
+  insertContent: (hash: string, content: string, createdAt: string) => Promise<void>;
+  insertDocument: (collectionName: string, path: string, title: string, hash: string, createdAt: string, modifiedAt: string) => Promise<void>;
+  findActiveDocument: (collectionName: string, path: string) => Promise<{ id: number; hash: string; title: string } | null>;
+  updateDocumentTitle: (documentId: number, title: string, modifiedAt: string) => Promise<void>;
+  updateDocument: (documentId: number, title: string, hash: string, modifiedAt: string) => Promise<void>;
+  deactivateDocument: (collectionName: string, path: string) => Promise<void>;
+  getActiveDocumentPaths: (collectionName: string) => Promise<string[]>;
 
   // Vector/embedding operations
-  getHashesForEmbedding: () => { hash: string; body: string; path: string }[];
-  clearAllEmbeddings: () => void;
-  insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => void;
+  getHashesForEmbedding: () => Promise<{ hash: string; body: string; path: string }[]>;
+  clearAllEmbeddings: () => Promise<void>;
+  insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => Promise<void>;
 
   // Collection management
-  listCollections: () => { name: string; pwd: string; glob_pattern: string; doc_count: number; active_count: number; last_modified: string | null }[];
-  removeCollection: (name: string) => { deletedDocs: number; cleanedHashes: number };
-  renameCollection: (oldName: string, newName: string) => void;
-  getAllCollections: () => { name: string }[];
+  listCollections: () => Promise<{ name: string; pwd: string; glob_pattern: string; doc_count: number; active_count: number; last_modified: string | null }[]>;
+  removeCollection: (name: string) => Promise<{ deletedDocs: number; cleanedHashes: number }>;
+  renameCollection: (oldName: string, newName: string) => Promise<void>;
+  getAllCollections: () => Promise<{ name: string }[]>;
 
   // Context management
-  insertContext: (collectionId: number, pathPrefix: string, context: string) => void;
-  deleteContext: (collectionName: string, pathPrefix: string) => number;
-  deleteGlobalContexts: () => number;
-  listPathContexts: () => { collection_name: string; path_prefix: string; context: string }[];
+  insertContext: (collectionId: number, pathPrefix: string, context: string) => Promise<void>;
+  deleteContext: (collectionName: string, pathPrefix: string) => Promise<number>;
+  deleteGlobalContexts: () => Promise<number>;
+  listPathContexts: () => Promise<{ collection_name: string; path_prefix: string; context: string }[]>;
 };

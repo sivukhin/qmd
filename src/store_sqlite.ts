@@ -1471,45 +1471,54 @@ export function createStore(dbPath?: string): Store {
   initializeDatabase(db);
 
   return {
-    db,
+    db: {
+      name: 'sqlite3',
+      db: db,
+      async exec(query, ...params) {
+        const result = db.run(query, ...params);
+        return { lastInsertRowid: result.lastInsertRowid as number };
+      },
+      async get(query, ...params) { return db.prepare(query).get(...params); },
+      async all(query, ...params) { return db.prepare(query).all(...params); },
+    },
     dbPath: resolvedPath,
     close: () => db.close(),
-    ensureVecTable: (dimensions: number) => ensureVecTableInternal(db, dimensions),
+    ensureVecTable: async (dimensions: number) => ensureVecTableInternal(db, dimensions),
 
     // Index health
-    getHashesNeedingEmbedding: () => getHashesNeedingEmbedding(db),
-    getIndexHealth: () => getIndexHealth(db),
-    getStatus: () => getStatus(db),
+    getHashesNeedingEmbedding: async () => getHashesNeedingEmbedding(db),
+    getIndexHealth: async () => getIndexHealth(db),
+    getStatus: async () => getStatus(db),
 
     // Caching
     getCacheKey,
-    getCachedResult: (cacheKey: string) => getCachedResult(db, cacheKey),
-    setCachedResult: (cacheKey: string, result: string) => setCachedResult(db, cacheKey, result),
-    clearCache: () => clearCache(db),
+    getCachedResult: async (cacheKey: string) => getCachedResult(db, cacheKey),
+    setCachedResult: async (cacheKey: string, result: string) => setCachedResult(db, cacheKey, result),
+    clearCache: async () => clearCache(db),
 
     // Cleanup and maintenance
-    deleteLLMCache: () => deleteLLMCache(db),
-    deleteInactiveDocuments: () => deleteInactiveDocuments(db),
-    cleanupOrphanedContent: () => cleanupOrphanedContent(db),
-    cleanupOrphanedVectors: () => cleanupOrphanedVectors(db),
-    vacuumDatabase: () => vacuumDatabase(db),
+    deleteLLMCache: async () => deleteLLMCache(db),
+    deleteInactiveDocuments: async () => deleteInactiveDocuments(db),
+    cleanupOrphanedContent: async () => cleanupOrphanedContent(db),
+    cleanupOrphanedVectors: async () => cleanupOrphanedVectors(db),
+    vacuumDatabase: async () => vacuumDatabase(db),
 
     // Context
-    getContextForFile: (filepath: string) => getContextForFile(db, filepath),
-    getContextForPath: (collectionName: string, path: string) => getContextForPath(db, collectionName, path),
+    getContextForFile: async (filepath: string) => getContextForFile(db, filepath),
+    getContextForPath: async (collectionName: string, path: string) => getContextForPath(db, collectionName, path),
     getCollectionByName: (name: string) => getCollectionByName(db, name),
-    getCollectionsWithoutContext: () => getCollectionsWithoutContext(db),
-    getTopLevelPathsWithoutContext: (collectionName: string) => getTopLevelPathsWithoutContext(db, collectionName),
+    getCollectionsWithoutContext: async () => getCollectionsWithoutContext(db),
+    getTopLevelPathsWithoutContext: async (collectionName: string) => getTopLevelPathsWithoutContext(db, collectionName),
 
     // Virtual paths
     parseVirtualPath,
     buildVirtualPath,
     isVirtualPath,
     resolveVirtualPath: (virtualPath: string) => resolveVirtualPath(db, virtualPath),
-    toVirtualPath: (absolutePath: string) => toVirtualPath(db, absolutePath),
+    toVirtualPath: async (absolutePath: string) => toVirtualPath(db, absolutePath),
 
     // Search
-    searchFTS: (query: string, limit?: number, collectionId?: number) => searchFTS(db, query, limit, collectionId),
+    searchFTS: async (query: string, limit?: number, collectionId?: number) => searchFTS(db, query, limit, collectionId),
     searchVec: (generate: () => Promise<number[] | null>, limit?: number, collectionName?: string) => searchVec(db, generate, limit, collectionName),
 
     // Query expansion & reranking
@@ -1517,39 +1526,39 @@ export function createStore(dbPath?: string): Store {
     rerank: (query: string, documents: { file: string; text: string }[], model?: string) => rerank(db, query, documents, model),
 
     // Document retrieval
-    findDocument: (filename: string, options?: { includeBody?: boolean }) => findDocument(db, filename, options),
-    getDocumentBody: (doc: DocumentResult | { filepath: string }, fromLine?: number, maxLines?: number) => getDocumentBody(db, doc, fromLine, maxLines),
-    findDocuments: (pattern: string, options?: { includeBody?: boolean; maxBytes?: number }) => findDocuments(db, pattern, options),
+    findDocument: async (filename: string, options?: { includeBody?: boolean }) => findDocument(db, filename, options),
+    getDocumentBody: async (doc: DocumentResult | { filepath: string }, fromLine?: number, maxLines?: number) => getDocumentBody(db, doc, fromLine, maxLines),
+    findDocuments: async (pattern: string, options?: { includeBody?: boolean; maxBytes?: number }) => findDocuments(db, pattern, options),
 
     // Fuzzy matching and docid lookup
-    findSimilarFiles: (query: string, maxDistance?: number, limit?: number) => findSimilarFiles(db, query, maxDistance, limit),
-    matchFilesByGlob: (pattern: string) => matchFilesByGlob(db, pattern),
-    findDocumentByDocid: (docid: string) => findDocumentByDocid(db, docid),
+    findSimilarFiles: async (query: string, maxDistance?: number, limit?: number) => findSimilarFiles(db, query, maxDistance, limit),
+    matchFilesByGlob: async (pattern: string) => matchFilesByGlob(db, pattern),
+    findDocumentByDocid: async (docid: string) => findDocumentByDocid(db, docid),
 
     // Document indexing operations
-    insertContent: (hash: string, content: string, createdAt: string) => insertContent(db, hash, content, createdAt),
-    insertDocument: (collectionName: string, path: string, title: string, hash: string, createdAt: string, modifiedAt: string) => insertDocument(db, collectionName, path, title, hash, createdAt, modifiedAt),
-    findActiveDocument: (collectionName: string, path: string) => findActiveDocument(db, collectionName, path),
-    updateDocumentTitle: (documentId: number, title: string, modifiedAt: string) => updateDocumentTitle(db, documentId, title, modifiedAt),
-    updateDocument: (documentId: number, title: string, hash: string, modifiedAt: string) => updateDocument(db, documentId, title, hash, modifiedAt),
-    deactivateDocument: (collectionName: string, path: string) => deactivateDocument(db, collectionName, path),
-    getActiveDocumentPaths: (collectionName: string) => getActiveDocumentPaths(db, collectionName),
+    insertContent: async (hash: string, content: string, createdAt: string) => insertContent(db, hash, content, createdAt),
+    insertDocument: async (collectionName: string, path: string, title: string, hash: string, createdAt: string, modifiedAt: string) => insertDocument(db, collectionName, path, title, hash, createdAt, modifiedAt),
+    findActiveDocument: async (collectionName: string, path: string) => findActiveDocument(db, collectionName, path),
+    updateDocumentTitle: async (documentId: number, title: string, modifiedAt: string) => updateDocumentTitle(db, documentId, title, modifiedAt),
+    updateDocument: async (documentId: number, title: string, hash: string, modifiedAt: string) => updateDocument(db, documentId, title, hash, modifiedAt),
+    deactivateDocument: async (collectionName: string, path: string) => deactivateDocument(db, collectionName, path),
+    getActiveDocumentPaths: async (collectionName: string) => getActiveDocumentPaths(db, collectionName),
 
     // Vector/embedding operations
-    getHashesForEmbedding: () => getHashesForEmbedding(db),
-    clearAllEmbeddings: () => clearAllEmbeddings(db),
-    insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => insertEmbedding(db, hash, seq, pos, embedding, model, embeddedAt),
+    getHashesForEmbedding: async () => getHashesForEmbedding(db),
+    clearAllEmbeddings: async () => clearAllEmbeddings(db),
+    insertEmbedding: async (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => insertEmbedding(db, hash, seq, pos, embedding, model, embeddedAt),
 
     // Collection management
-    listCollections: () => listCollections(db),
-    removeCollection: (name: string) => removeCollection(db, name),
-    renameCollection: (oldName: string, newName: string) => renameCollection(db, oldName, newName),
-    getAllCollections: () => getAllCollections(db),
+    listCollections: async () => listCollections(db),
+    removeCollection: async (name: string) => removeCollection(db, name),
+    renameCollection: async (oldName: string, newName: string) => renameCollection(db, oldName, newName),
+    getAllCollections: async () => getAllCollections(db),
 
     // Context management
-    insertContext: (collectionId: number, pathPrefix: string, context: string) => insertContext(db, collectionId, pathPrefix, context),
-    deleteContext: (collectionName: string, pathPrefix: string) => deleteContext(db, collectionName, pathPrefix),
-    deleteGlobalContexts: () => deleteGlobalContexts(db),
-    listPathContexts: () => listPathContexts(db),
+    insertContext: async (collectionId: number, pathPrefix: string, context: string) => insertContext(db, collectionId, pathPrefix, context),
+    deleteContext: async (collectionName: string, pathPrefix: string) => deleteContext(db, collectionName, pathPrefix),
+    deleteGlobalContexts: async () => deleteGlobalContexts(db),
+    listPathContexts: async () => listPathContexts(db),
   };
 }

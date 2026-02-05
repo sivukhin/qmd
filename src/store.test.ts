@@ -42,6 +42,7 @@ import {
 } from "./store.js";
 import type { CollectionConfig } from "./collections.js";
 import { getQueryEmbedding } from "./store_util.js";
+import type { StoreDb } from "./store_types.js";
 
 // =============================================================================
 // LlamaCpp Setup
@@ -104,7 +105,7 @@ async function cleanupTestDb(store: Store): Promise<void> {
 
 // Helper to insert a test document directly into the database
 async function insertTestDocument(
-  db: Database,
+  db: StoreDb,
   collectionName: string,
   opts: {
     name?: string;
@@ -139,16 +140,16 @@ async function insertTestDocument(
   const hash = opts.hash || await hashContent(body);
 
   // Insert content (with OR IGNORE for deduplication)
-  db.prepare(`
+  await db.exec(`
     INSERT OR IGNORE INTO content (hash, doc, created_at)
     VALUES (?, ?, ?)
-  `).run(hash, body, now);
+  `, hash, body, now);
 
   // Insert document
-  const result = db.prepare(`
+  const result = await db.exec(`
     INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(collectionName, path, title, hash, now, now, active);
+  `, collectionName, path, title, hash, now, now, active);
 
   return Number(result.lastInsertRowid);
 }
@@ -417,7 +418,6 @@ describe("Store Creation", () => {
   test("createStore creates a new store with custom path", async () => {
     const store = await createTestStore();
     expect(store.dbPath).toBe(testDbPath);
-    expect(store.db).toBeInstanceOf(Database);
     await cleanupTestDb(store);
   });
 
@@ -425,9 +425,9 @@ describe("Store Creation", () => {
     const store = await createTestStore();
 
     // Check tables exist
-    const tables = store.db.prepare(`
+    const tables = await store.db.all(`
       SELECT name FROM sqlite_master WHERE type='table' ORDER BY name
-    `).all() as { name: string }[];
+    `) as { name: string }[];
 
     const tableNames = tables.map(t => t.name);
     expect(tableNames).toContain("documents");
@@ -441,7 +441,7 @@ describe("Store Creation", () => {
 
   test("createStore sets WAL journal mode", async () => {
     const store = await createTestStore();
-    const result = store.db.prepare("PRAGMA journal_mode").get() as { journal_mode: string };
+    const result = await store.db.get("PRAGMA journal_mode") as { journal_mode: string };
     expect(result.journal_mode).toBe("wal");
     await cleanupTestDb(store);
   });
@@ -450,7 +450,7 @@ describe("Store Creation", () => {
     const store = await createTestStore();
     store.close();
     // Attempting to use db after close should throw
-    expect(() => store.db.prepare("SELECT 1").get()).toThrow();
+    expect(async () => await store.db.get("SELECT 1")).toThrow();
     try {
       await unlink(testDbPath);
     } catch { }
@@ -687,17 +687,17 @@ describe("Caching", () => {
     const value = "cached result";
 
     // Initially empty
-    expect(store.getCachedResult(key)).toBeNull();
+    expect(await store.getCachedResult(key)).toBeNull();
 
     // Set cache
-    store.setCachedResult(key, value);
+    await store.setCachedResult(key, value);
 
     // Retrieve cache
-    expect(store.getCachedResult(key)).toBe(value);
+    expect(await store.getCachedResult(key)).toBe(value);
 
     // Clear cache
-    store.clearCache();
-    expect(store.getCachedResult(key)).toBeNull();
+    await store.clearCache();
+    expect(await store.getCachedResult(key)).toBeNull();
 
     await cleanupTestDb(store);
   });
@@ -710,7 +710,7 @@ describe("Caching", () => {
 describe("Path Context", () => {
   test("getContextForFile returns null when no context set", async () => {
     const store = await createTestStore();
-    const context = store.getContextForFile("/some/random/path.md");
+    const context = await store.getContextForFile("/some/random/path.md");
     expect(context).toBeNull();
     await cleanupTestDb(store);
   });
@@ -726,7 +726,7 @@ describe("Path Context", () => {
       displayPath: "docs/readme.md",
     });
 
-    const context = store.getContextForFile("/test/collection/docs/readme.md");
+    const context = await store.getContextForFile("/test/collection/docs/readme.md");
     expect(context).toBe("Documentation files");
 
     await cleanupTestDb(store);
@@ -754,9 +754,9 @@ describe("Path Context", () => {
     });
 
     // Context now returns ALL matching contexts joined with \n\n
-    expect(store.getContextForFile("/test/collection/readme.md")).toBe("General test files");
-    expect(store.getContextForFile("/test/collection/docs/guide.md")).toBe("General test files\n\nDocumentation files");
-    expect(store.getContextForFile("/test/collection/docs/api/reference.md")).toBe("General test files\n\nDocumentation files\n\nAPI documentation");
+    expect(await store.getContextForFile("/test/collection/readme.md")).toBe("General test files");
+    expect(await store.getContextForFile("/test/collection/docs/guide.md")).toBe("General test files\n\nDocumentation files");
+    expect(await store.getContextForFile("/test/collection/docs/api/reference.md")).toBe("General test files\n\nDocumentation files\n\nAPI documentation");
 
     await cleanupTestDb(store);
   });
@@ -791,7 +791,7 @@ describe("FTS Search", () => {
       body: "The quick brown fox jumps over the lazy dog",
     });
 
-    const results = store.searchFTS("nonexistent-term-xyz", 10);
+    const results = await store.searchFTS("nonexistent-term-xyz", 10);
     expect(results).toHaveLength(0);
 
     await cleanupTestDb(store);
@@ -807,7 +807,7 @@ describe("FTS Search", () => {
       displayPath: "test/doc1.md",
     });
 
-    const results = store.searchFTS("fox", 10);
+    const results = await store.searchFTS("fox", 10);
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]!.displayPath).toBe(`${collectionName}/test/doc1.md`);
     expect(results[0]!.filepath).toBe(`qmd://${collectionName}/test/doc1.md`);
@@ -836,7 +836,7 @@ describe("FTS Search", () => {
       displayPath: "test/title.md",
     });
 
-    const results = store.searchFTS("fox", 10);
+    const results = await store.searchFTS("fox", 10);
     // Both documents contain "fox" in the body now, so we should get 2 results
     expect(results.length).toBe(2);
     // Title/name match should rank higher due to BM25 weights
@@ -858,7 +858,7 @@ describe("FTS Search", () => {
       });
     }
 
-    const results = store.searchFTS("common keyword", 3);
+    const results = await store.searchFTS("common keyword", 3);
     expect(results).toHaveLength(3);
 
     await cleanupTestDb(store);
@@ -881,11 +881,11 @@ describe("FTS Search", () => {
       displayPath: "doc2.md",
     });
 
-    const allResults = store.searchFTS("searchable", 10);
+    const allResults = await store.searchFTS("searchable", 10);
     expect(allResults).toHaveLength(2);
 
     // Filter by collection name (collectionId is now treated as collection name string)
-    const filtered = store.searchFTS("searchable", 10, collection1 as unknown as number);
+    const filtered = await store.searchFTS("searchable", 10, collection1 as unknown as number);
     expect(filtered).toHaveLength(1);
     expect(filtered[0]!.displayPath).toBe(`${collection1}/doc1.md`);
 
@@ -902,7 +902,7 @@ describe("FTS Search", () => {
     });
 
     // Should not throw on special characters
-    const results = store.searchFTS("foo(bar)", 10);
+    const results = await store.searchFTS("foo(bar)", 10);
     // Results may vary based on FTS5 handling
     expect(Array.isArray(results)).toBe(true);
 
@@ -927,7 +927,7 @@ describe("FTS Search", () => {
       active: 0,
     });
 
-    const results = store.searchFTS("findme", 10);
+    const results = await store.searchFTS("findme", 10);
     expect(results).toHaveLength(1);
     expect(results[0]!.displayPath).toBe(`${collectionName}/test/active.md`);
     expect(results[0]!.filepath).toBe(`qmd://${collectionName}/test/active.md`);
@@ -952,7 +952,7 @@ describe("Document Retrieval", () => {
         body: "Document content here",
       });
 
-      const result = store.findDocument("/exact/path/mydoc.md");
+      const result = await store.findDocument("/exact/path/mydoc.md");
       expect("error" in result).toBe(false);
       if (!("error" in result)) {
         expect(result.title).toBe("My Document");
@@ -972,7 +972,7 @@ describe("Document Retrieval", () => {
         displayPath: "docs/mydoc.md",
       });
 
-      const result = store.findDocument("docs/mydoc.md");
+      const result = await store.findDocument("docs/mydoc.md");
       expect("error" in result).toBe(false);
 
       await cleanupTestDb(store);
@@ -986,7 +986,7 @@ describe("Document Retrieval", () => {
         displayPath: "mydoc.md",
       });
 
-      const result = store.findDocument("mydoc.md");
+      const result = await store.findDocument("mydoc.md");
       expect("error" in result).toBe(false);
 
       await cleanupTestDb(store);
@@ -1001,7 +1001,7 @@ describe("Document Retrieval", () => {
         body: "The actual body content",
       });
 
-      const result = store.findDocument("/path/mydoc.md", { includeBody: true });
+      const result = await store.findDocument("/path/mydoc.md", { includeBody: true });
       expect("error" in result).toBe(false);
       if (!("error" in result)) {
         expect(result.body).toBe("The actual body content");
@@ -1019,7 +1019,7 @@ describe("Document Retrieval", () => {
         displayPath: "similar.md",
       });
 
-      const result = store.findDocument("simlar.md"); // typo - 1 char diff
+      const result = await store.findDocument("simlar.md"); // typo - 1 char diff
       expect("error" in result).toBe(true);
       if ("error" in result) {
         expect(result.error).toBe("not_found");
@@ -1039,7 +1039,7 @@ describe("Document Retrieval", () => {
         displayPath: "mydoc.md",
       });
 
-      const result = store.findDocument("mydoc.md:100");
+      const result = await store.findDocument("mydoc.md:100");
       expect("error" in result).toBe(false);
 
       await cleanupTestDb(store);
@@ -1055,7 +1055,7 @@ describe("Document Retrieval", () => {
         displayPath: "docs/mydoc.md",
       });
 
-      const result = store.findDocument("~/docs/mydoc.md");
+      const result = await store.findDocument("~/docs/mydoc.md");
       expect("error" in result).toBe(false);
 
       await cleanupTestDb(store);
@@ -1070,7 +1070,7 @@ describe("Document Retrieval", () => {
         displayPath: "docs/mydoc.md",
       });
 
-      const result = store.findDocument("/path/docs/mydoc.md");
+      const result = await store.findDocument("/path/docs/mydoc.md");
       expect("error" in result).toBe(false);
       if (!("error" in result)) {
         expect(result.context).toBe("Documentation");
@@ -1099,7 +1099,7 @@ describe("Document Retrieval", () => {
         displayPath: "podcasts/external/2024-jan-interview.md",
       });
 
-      const result = store.findDocument("/archive/podcasts/external/2024-jan-interview.md");
+      const result = await store.findDocument("/archive/podcasts/external/2024-jan-interview.md");
       expect("error" in result).toBe(false);
       if (!("error" in result)) {
         // Should have all contexts joined with double newlines
@@ -1125,7 +1125,7 @@ describe("Document Retrieval", () => {
         body: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
       });
 
-      const body = store.getDocumentBody({ filepath: "/path/mydoc.md" });
+      const body = await store.getDocumentBody({ filepath: "/path/mydoc.md" });
       expect(body).toBe("Line 1\nLine 2\nLine 3\nLine 4\nLine 5");
 
       await cleanupTestDb(store);
@@ -1140,7 +1140,7 @@ describe("Document Retrieval", () => {
         body: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
       });
 
-      const body = store.getDocumentBody({ filepath: "/path/mydoc.md" }, 2, 2);
+      const body = await store.getDocumentBody({ filepath: "/path/mydoc.md" }, 2, 2);
       expect(body).toBe("Line 2\nLine 3");
 
       await cleanupTestDb(store);
@@ -1148,7 +1148,7 @@ describe("Document Retrieval", () => {
 
     test("getDocumentBody returns null for non-existent document", async () => {
       const store = await createTestStore();
-      const body = store.getDocumentBody({ filepath: "/nonexistent.md" });
+      const body = await store.getDocumentBody({ filepath: "/nonexistent.md" });
       expect(body).toBeNull();
       await cleanupTestDb(store);
     });
@@ -1175,7 +1175,7 @@ describe("Document Retrieval", () => {
         displayPath: "other/file.md",
       });
 
-      const { docs, errors } = store.findDocuments("journals/2024-*.md");
+      const { docs, errors } = await store.findDocuments("journals/2024-*.md");
       expect(errors).toHaveLength(0);
       expect(docs).toHaveLength(2);
 
@@ -1197,7 +1197,7 @@ describe("Document Retrieval", () => {
         displayPath: "doc2.md",
       });
 
-      const { docs, errors } = store.findDocuments("doc1.md, doc2.md");
+      const { docs, errors } = await store.findDocuments("doc1.md, doc2.md");
       expect(errors).toHaveLength(0);
       expect(docs).toHaveLength(2);
 
@@ -1214,7 +1214,7 @@ describe("Document Retrieval", () => {
         displayPath: "doc1.md",
       });
 
-      const { docs, errors } = store.findDocuments("doc1.md, nonexistent.md");
+      const { docs, errors } = await store.findDocuments("doc1.md, nonexistent.md");
       expect(docs).toHaveLength(1);
       expect(errors).toHaveLength(1);
       expect(errors[0]).toContain("not found");
@@ -1233,7 +1233,7 @@ describe("Document Retrieval", () => {
         body: "x".repeat(20000), // 20KB
       });
 
-      const { docs } = store.findDocuments("large.md", { maxBytes: 10000 });
+      const { docs } = await store.findDocuments("large.md", { maxBytes: 10000 });
       expect(docs).toHaveLength(1);
       expect(docs[0]!.skipped).toBe(true);
       if (docs[0]!.skipped) {
@@ -1254,7 +1254,7 @@ describe("Document Retrieval", () => {
         body: "The content",
       });
 
-      const { docs } = store.findDocuments("doc1.md", { includeBody: true });
+      const { docs } = await store.findDocuments("doc1.md", { includeBody: true });
       expect(docs[0]!.skipped).toBe(false);
       if (!docs[0]!.skipped) {
         expect((docs[0] as { doc: { body: string }; skipped: false }).doc.body).toBe("The content");
@@ -1483,7 +1483,7 @@ describe("Reciprocal Rank Fusion", () => {
 describe("Index Status", () => {
   test("getStatus returns correct structure", async () => {
     const store = await createTestStore();
-    const status = store.getStatus();
+    const status = await store.getStatus();
     expect(status).toHaveProperty("totalDocuments");
     expect(status).toHaveProperty("needsEmbedding");
     expect(status).toHaveProperty("hasVectorIndex");
@@ -1501,7 +1501,7 @@ describe("Index Status", () => {
     await insertTestDocument(store.db, collectionName, { name: "doc2", active: 1 });
     await insertTestDocument(store.db, collectionName, { name: "doc3", active: 0 }); // inactive
 
-    const status = store.getStatus();
+    const status = await store.getStatus();
     expect(status.totalDocuments).toBe(2); // Only active docs
 
     await cleanupTestDb(store);
@@ -1512,7 +1512,7 @@ describe("Index Status", () => {
     const collectionName = await createTestCollection({ pwd: "/test/path", glob: "**/*.md" });
     await insertTestDocument(store.db, collectionName, { name: "doc1" });
 
-    const status = store.getStatus();
+    const status = await store.getStatus();
     expect(status.collections.length).toBeGreaterThanOrEqual(1);
     const col = status.collections.find(c => c.name === collectionName);
     expect(col).toBeDefined();
@@ -1532,7 +1532,7 @@ describe("Index Status", () => {
     await insertTestDocument(store.db, collectionName, { name: "doc2", hash: "hash2" });
     await insertTestDocument(store.db, collectionName, { name: "doc3", hash: "hash1" }); // same hash as doc1
 
-    const needsEmbedding = store.getHashesNeedingEmbedding();
+    const needsEmbedding = await store.getHashesNeedingEmbedding();
     expect(needsEmbedding).toBe(2); // hash1 and hash2
 
     await cleanupTestDb(store);
@@ -1543,7 +1543,7 @@ describe("Index Status", () => {
     const collectionName = await createTestCollection();
     await insertTestDocument(store.db, collectionName, { name: "doc1" });
 
-    const health = store.getIndexHealth();
+    const health = await store.getIndexHealth();
     expect(health).toHaveProperty("needsEmbedding");
     expect(health).toHaveProperty("totalDocs");
     expect(health).toHaveProperty("daysStale");
@@ -1571,7 +1571,7 @@ describe("Fuzzy Matching", () => {
       displayPath: "docs/readmi.md", // typo
     });
 
-    const similar = store.findSimilarFiles("docs/readme.md", 3, 5);
+    const similar = await store.findSimilarFiles("docs/readme.md", 3, 5);
     expect(similar).toContain("docs/readme.md");
 
     await cleanupTestDb(store);
@@ -1590,7 +1590,7 @@ describe("Fuzzy Matching", () => {
       displayPath: "xyz.md", // very different
     });
 
-    const similar = store.findSimilarFiles("abc.md", 1, 5); // max distance 1
+    const similar = await store.findSimilarFiles("abc.md", 1, 5); // max distance 1
     expect(similar).toContain("abc.md");
     expect(similar).not.toContain("xyz.md");
 
@@ -1614,7 +1614,7 @@ describe("Fuzzy Matching", () => {
       displayPath: "docs/readme.md",
     });
 
-    const matches = store.matchFilesByGlob("journals/*.md");
+    const matches = await store.matchFilesByGlob("journals/*.md");
     expect(matches).toHaveLength(2);
     expect(matches.every(m => m.displayPath.startsWith("journals/"))).toBe(true);
 
@@ -1631,17 +1631,17 @@ describe("Vector Table", () => {
     const store = await createTestStore();
 
     // Initially no vector table
-    let exists = store.db.prepare(`
+    let exists = await store.db.get(`
       SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'
-    `).get();
+    `);
     expect(exists).toBeFalsy(); // null or undefined
 
     // Create vector table
-    store.ensureVecTable(768);
+    await store.ensureVecTable(768);
 
-    exists = store.db.prepare(`
+    exists = await store.db.get(`
       SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'
-    `).get();
+    `);
     expect(exists).toBeTruthy();
 
     await cleanupTestDb(store);
@@ -1651,20 +1651,20 @@ describe("Vector Table", () => {
     const store = await createTestStore();
 
     // Create with 768 dimensions
-    store.ensureVecTable(768);
+    await store.ensureVecTable(768);
 
     // Check dimensions
-    let tableInfo = store.db.prepare(`
+    let tableInfo = await store.db.get(`
       SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'
-    `).get() as { sql: string };
+    `) as { sql: string };
     expect(tableInfo.sql).toContain("float[768]");
 
     // Recreate with different dimensions
-    store.ensureVecTable(1024);
+    await store.ensureVecTable(1024);
 
-    tableInfo = store.db.prepare(`
+    tableInfo = await store.db.get(`
       SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'
-    `).get() as { sql: string };
+    `) as { sql: string };
     expect(tableInfo.sql).toContain("float[1024]");
 
     await cleanupTestDb(store);
@@ -1701,16 +1701,16 @@ describe("Integration", () => {
     });
 
     // Search
-    const searchResults = store.searchFTS("project", 10);
+    const searchResults = await store.searchFTS("project", 10);
     expect(searchResults.length).toBe(2);
 
     // Status - SKIPPED: getStatus() has bug (queries non-existent collections table)
-    // const status = store.getStatus();
+    // const status = await store.getStatus();
     // expect(status.totalDocuments).toBe(2);
     // expect(status.collections).toHaveLength(1);
 
     // Retrieve single document
-    const doc = store.findDocument("notes/meeting.md", { includeBody: true });
+    const doc = await store.findDocument("notes/meeting.md", { includeBody: true });
     expect("error" in doc).toBe(false);
     if (!("error" in doc)) {
       expect(doc.title).toBe("Team Meeting Notes");
@@ -1719,7 +1719,7 @@ describe("Integration", () => {
     }
 
     // Multi-get
-    const { docs, errors } = store.findDocuments("notes/*.md", { includeBody: true });
+    const { docs, errors } = await store.findDocuments("notes/*.md", { includeBody: true });
     expect(errors).toHaveLength(0);
     expect(docs).toHaveLength(2);
 
@@ -1746,8 +1746,8 @@ describe("Integration", () => {
     });
 
     // Each store should only see its own documents
-    const results1 = store1.searchFTS("unique", 10);
-    const results2 = store2.searchFTS("different", 10);
+    const results1 = await store1.searchFTS("unique", 10);
+    const results2 = await store2.searchFTS("different", 10);
 
     expect(results1).toHaveLength(1);
     expect(results1[0]!.displayPath).toBe("store1/doc.md");
@@ -1758,8 +1758,8 @@ describe("Integration", () => {
     expect(results2[0]!.filepath).toBe("qmd://store2/doc.md");
 
     // Cross-check: store1 shouldn't find store2's content
-    const cross1 = store1.searchFTS("different", 10);
-    const cross2 = store2.searchFTS("unique", 10);
+    const cross1 = await store1.searchFTS("different", 10);
+    const cross2 = await store2.searchFTS("unique", 10);
 
     expect(cross1).toHaveLength(0);
     expect(cross2).toHaveLength(0);
@@ -1803,10 +1803,10 @@ describe("LlamaCpp Integration", () => {
     });
 
     // Create vector table and insert a vector
-    store.ensureVecTable(768);
+    await store.ensureVecTable(768);
     const embedding = Array(768).fill(0).map(() => Math.random());
-    store.db.prepare(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`).run(hash, new Date().toISOString());
-    store.db.prepare(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(`${hash}_0`, new Float32Array(embedding));
+    await store.db.exec(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`, hash, new Date().toISOString());
+    await store.db.exec(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`, `${hash}_0`, new Float32Array(embedding));
 
     const results = await store.searchVec(() => getQueryEmbedding("test query", "embeddinggemma"), 10);
     expect(results).toHaveLength(1);
@@ -1838,13 +1838,13 @@ describe("LlamaCpp Integration", () => {
     });
 
     // Create vectors_vec table with correct dimensions (768 for embeddinggemma)
-    store.ensureVecTable(768);
+    await store.ensureVecTable(768);
     const embedding1 = Array(768).fill(0).map(() => Math.random());
     const embedding2 = Array(768).fill(0).map(() => Math.random());
-    store.db.prepare(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`).run(hash1, new Date().toISOString());
-    store.db.prepare(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`).run(hash2, new Date().toISOString());
-    store.db.prepare(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(`${hash1}_0`, new Float32Array(embedding1));
-    store.db.prepare(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(`${hash2}_0`, new Float32Array(embedding2));
+    await store.db.exec(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`, hash1, new Date().toISOString());
+    await store.db.exec(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`, hash2, new Date().toISOString());
+    await store.db.exec(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`, `${hash1}_0`, new Float32Array(embedding1));
+    await store.db.exec(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`, `${hash2}_0`, new Float32Array(embedding2));
 
     // Search without filter - should return both
     const allResults = await store.searchVec(() => getQueryEmbedding("content", "embeddinggemma"), 10);
@@ -1875,10 +1875,10 @@ describe("LlamaCpp Integration", () => {
     });
 
     // Create vector table and insert a test vector
-    store.ensureVecTable(768);
+    await store.ensureVecTable(768);
     const embedding = Array(768).fill(0).map(() => Math.random());
-    store.db.prepare(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`).run(hash, new Date().toISOString());
-    store.db.prepare(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(`${hash}_0`, new Float32Array(embedding));
+    await store.db.exec(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`, hash, new Date().toISOString());
+    await store.db.exec(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`, `${hash}_0`, new Float32Array(embedding));
 
     // This should complete quickly (not hang) due to the two-step fix
     // The old code with JOINs in the sqlite-vec query would hang indefinitely
@@ -1959,15 +1959,15 @@ describe("Edge Cases", () => {
   test("handles empty database gracefully", async () => {
     const store = await createTestStore();
 
-    const searchResults = store.searchFTS("anything", 10);
+    const searchResults = await store.searchFTS("anything", 10);
     expect(searchResults).toHaveLength(0);
 
     // SKIPPED: getStatus() has bug (queries non-existent collections table)
-    // const status = store.getStatus();
+    // const status = await store.getStatus();
     // expect(status.totalDocuments).toBe(0);
     // expect(status.collections).toHaveLength(0);
 
-    const doc = store.findDocument("nonexistent.md");
+    const doc = await store.findDocument("nonexistent.md");
     expect("error" in doc).toBe(true);
 
     await cleanupTestDb(store);
@@ -1984,7 +1984,7 @@ describe("Edge Cases", () => {
       displayPath: "long.md",
     });
 
-    const results = store.searchFTS("word", 10);
+    const results = await store.searchFTS("word", 10);
     expect(results).toHaveLength(1);
 
     await cleanupTestDb(store);
@@ -2002,11 +2002,11 @@ describe("Edge Cases", () => {
     });
 
     // Should be searchable
-    const results = store.searchFTS("日本語", 10);
+    const results = await store.searchFTS("日本語", 10);
     expect(results.length).toBeGreaterThan(0);
 
     // Should retrieve correctly
-    const doc = store.findDocument("unicode.md", { includeBody: true });
+    const doc = await store.findDocument("unicode.md", { includeBody: true });
     expect("error" in doc).toBe(false);
     if (!("error" in doc)) {
       expect(doc.title).toBe("日本語タイトル");
@@ -2027,7 +2027,7 @@ describe("Edge Cases", () => {
       body: "Content",
     });
 
-    const doc = store.findDocument("file with spaces.md");
+    const doc = await store.findDocument("file with spaces.md");
     expect("error" in doc).toBe(false);
 
     await cleanupTestDb(store);
@@ -2049,7 +2049,7 @@ describe("Edge Cases", () => {
     await Promise.all(inserts);
 
     // All should be searchable
-    const results = store.searchFTS("searchterm", 20);
+    const results = await store.searchFTS("searchterm", 20);
     expect(results).toHaveLength(10);
 
     await cleanupTestDb(store);
@@ -2085,14 +2085,14 @@ describe("Content-Addressable Storage", () => {
     });
 
     // Both should have the same hash
-    const hash1Db = store.db.prepare(`SELECT hash FROM documents WHERE id = ?`).get(doc1) as { hash: string };
-    const hash2Db = store.db.prepare(`SELECT hash FROM documents WHERE id = ?`).get(doc2) as { hash: string };
+    const hash1Db = await store.db.get(`SELECT hash FROM documents WHERE id = ?`, doc1) as { hash: string };
+    const hash2Db = await store.db.get(`SELECT hash FROM documents WHERE id = ?`, doc2) as { hash: string };
 
     expect(hash1Db.hash).toBe(hash2Db.hash);
     expect(hash1Db.hash).toBe(hash1);
 
     // There should only be one entry in the content table
-    const contentCount = store.db.prepare(`SELECT COUNT(*) as count FROM content WHERE hash = ?`).get(hash1) as { count: number };
+    const contentCount = await store.db.get(`SELECT COUNT(*) as count FROM content WHERE hash = ?`, hash1) as { count: number };
     expect(contentCount.count).toBe(1);
 
     await cleanupTestDb(store);
@@ -2132,26 +2132,26 @@ describe("Content-Addressable Storage", () => {
     });
 
     // Verify both hashes exist in content table
-    const sharedExists1 = store.db.prepare(`SELECT hash FROM content WHERE hash = ?`).get(sharedHash);
-    const uniqueExists1 = store.db.prepare(`SELECT hash FROM content WHERE hash = ?`).get(uniqueHash);
+    const sharedExists1 = await store.db.get(`SELECT hash FROM content WHERE hash = ?`, sharedHash);
+    const uniqueExists1 = await store.db.get(`SELECT hash FROM content WHERE hash = ?`, uniqueHash);
     expect(sharedExists1).toBeTruthy();
     expect(uniqueExists1).toBeTruthy();
 
     // Remove collection1 documents (collections are in YAML now)
-    store.db.prepare(`DELETE FROM documents WHERE collection = ?`).run(collection1);
+    await store.db.exec(`DELETE FROM documents WHERE collection = ?`, collection1);
 
     // Clean up orphaned content (mimics what the CLI does)
-    store.db.prepare(`
+    await store.db.exec(`
       DELETE FROM content
       WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)
-    `).run();
+    `);
 
     // Shared content should still exist (used by collection2)
-    const sharedExists2 = store.db.prepare(`SELECT hash FROM content WHERE hash = ?`).get(sharedHash);
+    const sharedExists2 = await store.db.get(`SELECT hash FROM content WHERE hash = ?`, sharedHash);
     expect(sharedExists2).toBeTruthy();
 
     // Unique content should be removed (only used by collection1)
-    const uniqueExists2 = store.db.prepare(`SELECT hash FROM content WHERE hash = ?`).get(uniqueHash);
+    const uniqueExists2 = await store.db.get(`SELECT hash FROM content WHERE hash = ?`, uniqueHash);
     expect(uniqueExists2).toBeFalsy();
 
     await cleanupTestDb(store);
@@ -2177,15 +2177,15 @@ describe("Content-Addressable Storage", () => {
     }
 
     // Should have 5 documents
-    const docCount = store.db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number };
+    const docCount = await store.db.get(`SELECT COUNT(*) as count FROM documents WHERE active = 1`) as { count: number };
     expect(docCount.count).toBe(5);
 
     // But only 1 content entry
-    const contentCount = store.db.prepare(`SELECT COUNT(*) as count FROM content WHERE hash = ?`).get(sharedHash) as { count: number };
+    const contentCount = await store.db.get(`SELECT COUNT(*) as count FROM content WHERE hash = ?`, sharedHash) as { count: number };
     expect(contentCount.count).toBe(1);
 
     // All documents should point to the same hash
-    const hashes = store.db.prepare(`SELECT DISTINCT hash FROM documents WHERE active = 1`).all() as { hash: string }[];
+    const hashes = await store.db.all(`SELECT DISTINCT hash FROM documents WHERE active = 1`) as { hash: string }[];
     expect(hashes).toHaveLength(1);
     expect(hashes[0]!.hash).toBe(sharedHash);
 
@@ -2217,15 +2217,15 @@ describe("Content-Addressable Storage", () => {
     });
 
     // Both hashes should exist in content table
-    const hash1Db = store.db.prepare(`SELECT hash FROM documents WHERE id = ?`).get(doc1) as { hash: string };
-    const hash2Db = store.db.prepare(`SELECT hash FROM documents WHERE id = ?`).get(doc2) as { hash: string };
+    const hash1Db = await store.db.get(`SELECT hash FROM documents WHERE id = ?`, doc1) as { hash: string };
+    const hash2Db = await store.db.get(`SELECT hash FROM documents WHERE id = ?`, doc2) as { hash: string };
 
     expect(hash1Db.hash).toBe(hash1);
     expect(hash2Db.hash).toBe(hash2);
     expect(hash1Db.hash).not.toBe(hash2Db.hash);
 
     // Should have 2 entries in content table
-    const contentCount = store.db.prepare(`SELECT COUNT(*) as count FROM content`).get() as { count: number };
+    const contentCount = await store.db.get(`SELECT COUNT(*) as count FROM content`) as { count: number };
     expect(contentCount.count).toBe(2);
 
     await cleanupTestDb(store);

@@ -116,7 +116,5 @@ export { formatQueryForEmbedding, formatDocForEmbedding } from "./llm";
 
 export {
   createTursoStore,
-  type TursoStore,
   type TursoDatabase,
-  type TursoStatement,
 } from "./store_turso";

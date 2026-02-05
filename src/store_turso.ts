@@ -20,25 +20,44 @@
  */
 
 import type { connect } from "@tursodatabase/database";
+import { Glob } from "bun";
 import {
+  type Store,
   type DocumentResult,
   type DocumentNotFound,
+  type MultiGetResult,
   type SearchResult,
+  type IndexStatus,
   type IndexHealthInfo,
+  DEFAULT_RERANK_MODEL,
+  DEFAULT_QUERY_MODEL,
+  DEFAULT_MULTI_GET_MAX_BYTES,
 } from "./store_types";
 import {
   parseVirtualPath,
+  buildVirtualPath,
+  isVirtualPath,
   getDocid,
   normalizeDocid,
   isDocid,
   levenshtein,
   homedir,
+  resolve,
+  getCacheKey,
 } from "./store_util";
 import {
   getCollection,
   listCollections as collectionsListCollections,
   loadConfig as collectionsLoadConfig,
+  addContext as collectionsAddContext,
+  removeContext as collectionsRemoveContext,
+  listAllContexts as collectionsListAllContexts,
+  setGlobalContext,
 } from "./collections";
+import {
+  getDefaultLlamaCpp,
+  type RerankDocument,
+} from "./llm";
 
 // =============================================================================
 // Turso Database Type
@@ -46,54 +65,35 @@ import {
 
 export type TursoDatabase = Awaited<ReturnType<typeof connect>>;
 
-// Statement type from Turso
-export type TursoStatement = ReturnType<TursoDatabase["prepare"]>;
-
 // =============================================================================
-// Turso Store Interface (Async)
+// Query Plan Utility
 // =============================================================================
 
-export type TursoStore = {
-  db: TursoDatabase;
-  close: () => void;
+export async function explainQuery(db: TursoDatabase, sql: string, params?: any[]): Promise<string> {
+  try {
+    const rows = await db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...(params || [])) as any[];
+    if (rows.length === 0) return "(empty plan)";
 
-  // Index health
-  getHashesNeedingEmbedding: () => Promise<number>;
-  getIndexHealth: () => Promise<IndexHealthInfo>;
+    const lines: string[] = [];
+    for (const row of rows) {
+      const indent = "  ".repeat(row.id || 0);
+      const detail = row.detail || row.opcode || JSON.stringify(row);
+      lines.push(`${indent}${detail}`);
+    }
+    return lines.join("\n");
+  } catch (e: any) {
+    return `(explain failed: ${e.message})`;
+  }
+}
 
-  // Caching
-  getCachedResult: (cacheKey: string) => Promise<string | null>;
-  setCachedResult: (cacheKey: string, result: string) => Promise<void>;
-  clearCache: () => Promise<void>;
-
-  // Context
-  getContextForFile: (filepath: string) => Promise<string | null>;
-  getCollectionByName: (name: string) => { name: string; pwd: string; glob_pattern: string } | null;
-
-  // Document retrieval
-  findDocument: (filename: string, options?: { includeBody?: boolean }) => Promise<DocumentResult | DocumentNotFound>;
-  getDocumentBody: (doc: DocumentResult | { filepath: string }, fromLine?: number, maxLines?: number) => Promise<string | null>;
-
-  // Fuzzy matching and docid lookup
-  findSimilarFiles: (query: string, maxDistance?: number, limit?: number) => Promise<string[]>;
-  findDocumentByDocid: (docid: string) => Promise<{ filepath: string; hash: string } | null>;
-
-  // Document indexing operations
-  insertContent: (hash: string, content: string, createdAt: string) => Promise<void>;
-  insertDocument: (collectionName: string, path: string, title: string, hash: string, createdAt: string, modifiedAt: string) => Promise<void>;
-  findActiveDocument: (collectionName: string, path: string) => Promise<{ id: number; hash: string; title: string } | null>;
-  deactivateDocument: (collectionName: string, path: string) => Promise<void>;
-  getActiveDocumentPaths: (collectionName: string) => Promise<string[]>;
-
-  // Vector/embedding operations
-  insertEmbedding: (hash: string, seq: number, pos: number, embedding: number[], model: string, embeddedAt: string) => Promise<void>;
-  getHashesForEmbedding: () => Promise<{ hash: string; body: string; path: string }[]>;
-  clearAllEmbeddings: () => Promise<void>;
-
-  // Search
-  searchVec: (queryEmbedding: number[], limit?: number, collectionName?: string) => Promise<SearchResult[]>;
-  searchFts: (query: string, limit?: number, collectionName?: string) => Promise<SearchResult[]>;
-};
+export async function printQueryPlan(db: TursoDatabase, sql: string, params?: any[]): Promise<void> {
+  const plan = await explainQuery(db, sql, params);
+  console.log("=== Query Plan ===");
+  console.log(sql.trim());
+  console.log("---");
+  console.log(plan);
+  console.log("==================\n");
+}
 
 // =============================================================================
 // Database Initialization
@@ -219,6 +219,105 @@ async function clearCache(db: TursoDatabase): Promise<void> {
 }
 
 // =============================================================================
+// Cleanup and Maintenance
+// =============================================================================
+
+async function deleteLLMCache(db: TursoDatabase): Promise<number> {
+  const result = await db.prepare(`DELETE FROM llm_cache`).run();
+  return result.changes;
+}
+
+async function deleteInactiveDocuments(db: TursoDatabase): Promise<number> {
+  const result = await db.prepare(`DELETE FROM documents WHERE active = 0`).run();
+  return result.changes;
+}
+
+async function cleanupOrphanedContent(db: TursoDatabase): Promise<number> {
+  const result = await db.prepare(`
+    DELETE FROM content
+    WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)
+  `).run();
+  return result.changes;
+}
+
+async function cleanupOrphanedVectors(db: TursoDatabase): Promise<number> {
+  // Count orphaned vectors first
+  const countResult = await db.prepare(`
+    SELECT COUNT(*) as c FROM content_vectors cv
+    WHERE NOT EXISTS (
+      SELECT 1 FROM documents d WHERE d.hash = cv.hash AND d.active = 1
+    )
+  `).get() as { c: number } | undefined;
+
+  const count = countResult?.c ?? 0;
+  if (count === 0) {
+    return 0;
+  }
+
+  // Delete orphaned vectors
+  await db.exec(`
+    DELETE FROM content_vectors WHERE hash NOT IN (
+      SELECT hash FROM documents WHERE active = 1
+    )
+  `);
+
+  return count;
+}
+
+async function vacuumDatabase(db: TursoDatabase): Promise<void> {
+  await db.exec(`VACUUM`);
+}
+
+// =============================================================================
+// Status
+// =============================================================================
+
+async function getStatus(db: TursoDatabase): Promise<IndexStatus> {
+  const yamlCollections = collectionsListCollections();
+
+  const collections = [];
+  for (const col of yamlCollections) {
+    const stats = await db.prepare(`
+      SELECT
+        COUNT(*) as active_count,
+        MAX(modified_at) as last_doc_update
+      FROM documents
+      WHERE collection = ? AND active = 1
+    `).get(col.name) as { active_count: number; last_doc_update: string | null } | undefined;
+
+    collections.push({
+      name: col.name,
+      path: col.path,
+      pattern: col.pattern,
+      documents: stats?.active_count ?? 0,
+      lastUpdated: stats?.last_doc_update || new Date().toISOString(),
+    });
+  }
+
+  // Sort by last update time (most recent first)
+  collections.sort((a, b) => {
+    if (!a.lastUpdated) return 1;
+    if (!b.lastUpdated) return -1;
+    return new Date(b.lastUpdated).getTime() - new Date(a.lastUpdated).getTime();
+  });
+
+  const totalResult = await db.prepare(`SELECT COUNT(*) as c FROM documents WHERE active = 1`).get() as { c: number } | undefined;
+  const totalDocs = totalResult?.c ?? 0;
+  const needsEmbedding = await getHashesNeedingEmbedding(db);
+
+  // Check if any vectors exist
+  const vecResult = await db.prepare(`SELECT 1 FROM content_vectors LIMIT 1`).get();
+  const hasVectors = !!vecResult;
+
+  return {
+    totalDocuments: totalDocs,
+    needsEmbedding,
+    hasVectorIndex: hasVectors,
+    collections,
+  };
+}
+
+// =============================================================================
 // Document Indexing Operations
 // =============================================================================
 
@@ -264,6 +363,25 @@ async function deactivateDocument(db: TursoDatabase, collectionName: string, pat
   }
 }
 
+async function updateDocumentTitle(db: TursoDatabase, documentId: number, title: string, modifiedAt: string): Promise<void> {
+  await db.prepare(`UPDATE documents SET title = ?, modified_at = ? WHERE id = ?`).run(title, modifiedAt, documentId);
+
+  // Also update the FTS search table
+  await db.prepare(`UPDATE documents_search SET title = ? WHERE doc_id = ?`).run(title, documentId);
+}
+
+async function updateDocument(db: TursoDatabase, documentId: number, title: string, hash: string, modifiedAt: string): Promise<void> {
+  await db.prepare(`UPDATE documents SET title = ?, hash = ?, modified_at = ? WHERE id = ?`).run(title, hash, modifiedAt, documentId);
+
+  // Update the FTS search table with new content
+  const content = await db.prepare(`SELECT doc FROM content WHERE hash = ?`).get(hash) as { doc: string } | undefined;
+  const doc = await db.prepare(`SELECT collection, path FROM documents WHERE id = ?`).get(documentId) as { collection: string; path: string } | undefined;
+  if (content && doc) {
+    const filepath = `${doc.collection}/${doc.path}`;
+    await db.prepare(`INSERT OR REPLACE INTO documents_search (doc_id, filepath, title, body) VALUES (?, ?, ?, ?)`).run(documentId, filepath, title, content.doc);
+  }
+}
+
 async function getActiveDocumentPaths(db: TursoDatabase, collectionName: string): Promise<string[]> {
   const rows = await db.prepare(`SELECT path FROM documents WHERE collection = ? AND active = 1`).all(collectionName) as { path: string }[];
   return rows.map(r => r.path);
@@ -278,8 +396,8 @@ function toVector32String(embedding: number[]): string {
   return `[${embedding.join(', ')}]`;
 }
 
-async function insertEmbedding(db: TursoDatabase, hash: string, seq: number, pos: number, embedding: number[], model: string, embeddedAt: string): Promise<void> {
-  const vectorStr = toVector32String(embedding);
+async function insertEmbedding(db: TursoDatabase, hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string): Promise<void> {
+  const vectorStr = toVector32String(Array.from(embedding));
   await db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, embedding, model, embedded_at) VALUES (?, ?, ?, vector32(?), ?, ?)`).run(hash, seq, pos, vectorStr, model, embeddedAt);
 }
 
@@ -383,6 +501,145 @@ function getCollectionByName(name: string): { name: string; pwd: string; glob_pa
   return { name: collection.name, pwd: collection.path, glob_pattern: collection.pattern };
 }
 
+async function getContextForPath(db: TursoDatabase, collectionName: string, path: string): Promise<string | null> {
+  const config = collectionsLoadConfig();
+  const coll = getCollection(collectionName);
+
+  if (!coll) return null;
+
+  const contexts: string[] = [];
+
+  // Add global context if present
+  if (config.global_context) {
+    contexts.push(config.global_context);
+  }
+
+  // Add all matching path contexts (from most general to most specific)
+  if (coll.context) {
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+
+    const matchingContexts: { prefix: string; context: string }[] = [];
+    for (const [prefix, context] of Object.entries(coll.context)) {
+      const normalizedPrefix = prefix.startsWith("/") ? prefix : `/${prefix}`;
+      if (normalizedPath.startsWith(normalizedPrefix)) {
+        matchingContexts.push({ prefix: normalizedPrefix, context });
+      }
+    }
+
+    matchingContexts.sort((a, b) => a.prefix.length - b.prefix.length);
+
+    for (const match of matchingContexts) {
+      contexts.push(match.context);
+    }
+  }
+
+  return contexts.length > 0 ? contexts.join('\n\n') : null;
+}
+
+async function getCollectionsWithoutContext(db: TursoDatabase): Promise<{ name: string; pwd: string; doc_count: number }[]> {
+  const yamlCollections = collectionsListCollections();
+  const result: { name: string; pwd: string; doc_count: number }[] = [];
+
+  for (const coll of yamlCollections) {
+    if (!coll.context || Object.keys(coll.context).length === 0) {
+      const stats = await db.prepare(`
+        SELECT COUNT(d.id) as doc_count
+        FROM documents d
+        WHERE d.collection = ? AND d.active = 1
+      `).get(coll.name) as { doc_count: number } | undefined;
+
+      result.push({
+        name: coll.name,
+        pwd: coll.path,
+        doc_count: stats?.doc_count || 0,
+      });
+    }
+  }
+
+  return result.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function getTopLevelPathsWithoutContext(db: TursoDatabase, collectionName: string): Promise<string[]> {
+  const paths = await db.prepare(`
+    SELECT DISTINCT path FROM documents
+    WHERE collection = ? AND active = 1
+  `).all(collectionName) as { path: string }[];
+
+  const yamlColl = getCollection(collectionName);
+  if (!yamlColl) return [];
+
+  const contextPrefixes = new Set<string>();
+  if (yamlColl.context) {
+    for (const prefix of Object.keys(yamlColl.context)) {
+      contextPrefixes.add(prefix);
+    }
+  }
+
+  const topLevelDirs = new Set<string>();
+  for (const { path } of paths) {
+    const parts = path.split('/').filter(Boolean);
+    if (parts.length > 1) {
+      const dir = parts[0];
+      if (dir) topLevelDirs.add(dir);
+    }
+  }
+
+  const missing: string[] = [];
+  for (const dir of topLevelDirs) {
+    let hasContext = false;
+    for (const prefix of contextPrefixes) {
+      if (prefix === '' || prefix === dir || dir.startsWith(prefix + '/')) {
+        hasContext = true;
+        break;
+      }
+    }
+    if (!hasContext) {
+      missing.push(dir);
+    }
+  }
+
+  return missing.sort();
+}
+
+// =============================================================================
+// Virtual Path Functions
+// =============================================================================
+
+function resolveVirtualPath(virtualPath: string): string | null {
+  const parsed = parseVirtualPath(virtualPath);
+  if (!parsed) return null;
+
+  const coll = getCollectionByName(parsed.collectionName);
+  if (!coll) return null;
+
+  return resolve(coll.pwd, parsed.path);
+}
+
+async function toVirtualPath(db: TursoDatabase, absolutePath: string): Promise<string | null> {
+  const collections = collectionsListCollections();
+
+  for (const coll of collections) {
+    if (absolutePath.startsWith(coll.path + '/') || absolutePath === coll.path) {
+      const relativePath = absolutePath.startsWith(coll.path + '/')
+        ? absolutePath.slice(coll.path.length + 1)
+        : '';
+
+      const doc = await db.prepare(`
+        SELECT d.path
+        FROM documents d
+        WHERE d.collection = ? AND d.path = ? AND d.active = 1
+        LIMIT 1
+      `).get(coll.name, relativePath);
+
+      if (doc) {
+        return buildVirtualPath(coll.name, relativePath);
+      }
+    }
+  }
+
+  return null;
+}
+
 // =============================================================================
 // Document Retrieval
 // =============================================================================
@@ -474,12 +731,334 @@ async function getDocumentBody(db: TursoDatabase, doc: { filepath: string }, fro
   return body;
 }
 
+async function matchFilesByGlob(db: TursoDatabase, pattern: string): Promise<{ filepath: string; displayPath: string; bodyLength: number }[]> {
+  const allFiles = await db.prepare(`
+    SELECT
+      'qmd://' || d.collection || '/' || d.path as virtual_path,
+      LENGTH(content.doc) as body_length,
+      d.path,
+      d.collection
+    FROM documents d
+    JOIN content ON content.hash = d.hash
+    WHERE d.active = 1
+  `).all() as { virtual_path: string; body_length: number; path: string; collection: string }[];
+
+  const glob = new Glob(pattern);
+  return allFiles
+    .filter(f => glob.match(f.virtual_path) || glob.match(f.path))
+    .map(f => ({
+      filepath: f.virtual_path,
+      displayPath: f.path,
+      bodyLength: f.body_length
+    }));
+}
+
+type DbDocRow = {
+  virtual_path: string;
+  display_path: string;
+  title: string;
+  hash: string;
+  collection: string;
+  path: string;
+  modified_at: string;
+  body_length: number;
+  body?: string;
+};
+
+async function findDocuments(
+  db: TursoDatabase,
+  pattern: string,
+  options: { includeBody?: boolean; maxBytes?: number } = {}
+): Promise<{ docs: MultiGetResult[]; errors: string[] }> {
+  const isCommaSeparated = pattern.includes(',') && !pattern.includes('*') && !pattern.includes('?');
+  const errors: string[] = [];
+  const maxBytes = options.maxBytes ?? DEFAULT_MULTI_GET_MAX_BYTES;
+
+  const bodyCol = options.includeBody ? `, content.doc as body` : ``;
+  const selectCols = `
+    'qmd://' || d.collection || '/' || d.path as virtual_path,
+    d.collection || '/' || d.path as display_path,
+    d.title,
+    d.hash,
+    d.collection,
+    d.modified_at,
+    LENGTH(content.doc) as body_length
+    ${bodyCol}
+  `;
+
+  let fileRows: DbDocRow[];
+
+  if (isCommaSeparated) {
+    const names = pattern.split(',').map(s => s.trim()).filter(Boolean);
+    fileRows = [];
+    for (const name of names) {
+      let doc = await db.prepare(`
+        SELECT ${selectCols}
+        FROM documents d
+        JOIN content ON content.hash = d.hash
+        WHERE 'qmd://' || d.collection || '/' || d.path = ? AND d.active = 1
+      `).get(name) as DbDocRow | undefined;
+      if (!doc) {
+        doc = await db.prepare(`
+          SELECT ${selectCols}
+          FROM documents d
+          JOIN content ON content.hash = d.hash
+          WHERE 'qmd://' || d.collection || '/' || d.path LIKE ? AND d.active = 1
+          LIMIT 1
+        `).get(`%${name}`) as DbDocRow | undefined;
+      }
+      if (doc) {
+        fileRows.push(doc);
+      } else {
+        const similar = await findSimilarFiles(db, name, 5, 3);
+        let msg = `File not found: ${name}`;
+        if (similar.length > 0) {
+          msg += ` (did you mean: ${similar.join(', ')}?)`;
+        }
+        errors.push(msg);
+      }
+    }
+  } else {
+    const matched = await matchFilesByGlob(db, pattern);
+    if (matched.length === 0) {
+      errors.push(`No files matched pattern: ${pattern}`);
+      return { docs: [], errors };
+    }
+    const virtualPaths = matched.map(m => m.filepath);
+    const placeholders = virtualPaths.map(() => '?').join(',');
+    fileRows = await db.prepare(`
+      SELECT ${selectCols}
+      FROM documents d
+      JOIN content ON content.hash = d.hash
+      WHERE 'qmd://' || d.collection || '/' || d.path IN (${placeholders}) AND d.active = 1
+    `).all(...virtualPaths) as DbDocRow[];
+  }
+
+  const results: MultiGetResult[] = [];
+
+  for (const row of fileRows) {
+    const virtualPath = row.virtual_path || `qmd://${row.collection}/${row.display_path}`;
+    const context = await getContextForFile(db, virtualPath);
+
+    if (row.body_length > maxBytes) {
+      results.push({
+        doc: { filepath: virtualPath, displayPath: row.display_path },
+        skipped: true,
+        skipReason: `File too large (${Math.round(row.body_length / 1024)}KB > ${Math.round(maxBytes / 1024)}KB)`,
+      });
+      continue;
+    }
+
+    results.push({
+      doc: {
+        filepath: virtualPath,
+        displayPath: row.display_path,
+        title: row.title || row.display_path.split('/').pop() || row.display_path,
+        context,
+        hash: row.hash,
+        docid: getDocid(row.hash),
+        collectionName: row.collection,
+        modifiedAt: row.modified_at,
+        bodyLength: row.body_length,
+        ...(options.includeBody && row.body !== undefined && { body: row.body }),
+      },
+      skipped: false,
+    });
+  }
+
+  return { docs: results, errors };
+}
+
+// =============================================================================
+// Query Expansion & Reranking
+// =============================================================================
+
+async function expandQuery(db: TursoDatabase, query: string, model: string = DEFAULT_QUERY_MODEL): Promise<string[]> {
+  const cacheKey = getCacheKey("expandQuery", { query, model });
+  const cached = await getCachedResult(db, cacheKey);
+  if (cached) {
+    const lines = cached.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    return [query, ...lines.slice(0, 2)];
+  }
+
+  const llm = getDefaultLlamaCpp();
+  const results = await llm.expandQuery(query);
+  const queryTexts = results.map(r => r.text);
+
+  const expandedOnly = queryTexts.filter(t => t !== query);
+  if (expandedOnly.length > 0) {
+    await setCachedResult(db, cacheKey, expandedOnly.join('\n'));
+  }
+
+  return Array.from(new Set([query, ...queryTexts]));
+}
+
+async function rerank(db: TursoDatabase, query: string, documents: { file: string; text: string }[], model: string = DEFAULT_RERANK_MODEL): Promise<{ file: string; score: number }[]> {
+  const cachedResults: Map<string, number> = new Map();
+  const uncachedDocs: RerankDocument[] = [];
+
+  for (const doc of documents) {
+    const cacheKey = getCacheKey("rerank", { query, file: doc.file, model });
+    const cached = await getCachedResult(db, cacheKey);
+    if (cached !== null) {
+      cachedResults.set(doc.file, parseFloat(cached));
+    } else {
+      uncachedDocs.push({ file: doc.file, text: doc.text });
+    }
+  }
+
+  if (uncachedDocs.length > 0) {
+    const llm = getDefaultLlamaCpp();
+    const rerankResult = await llm.rerank(query, uncachedDocs, { model });
+
+    for (const result of rerankResult.results) {
+      const cacheKey = getCacheKey("rerank", { query, file: result.file, model });
+      await setCachedResult(db, cacheKey, result.score.toString());
+      cachedResults.set(result.file, result.score);
+    }
+  }
+
+  return documents
+    .map(doc => ({ file: doc.file, score: cachedResults.get(doc.file) || 0 }))
+    .sort((a, b) => b.score - a.score);
+}
+
+// =============================================================================
+// Collection Management
+// =============================================================================
+
+async function listCollections(db: TursoDatabase): Promise<{ name: string; pwd: string; glob_pattern: string; doc_count: number; active_count: number; last_modified: string | null }[]> {
+  const collections = collectionsListCollections();
+
+  const result = [];
+  for (const coll of collections) {
+    const stats = await db.prepare(`
+      SELECT
+        COUNT(d.id) as doc_count,
+        SUM(CASE WHEN d.active = 1 THEN 1 ELSE 0 END) as active_count,
+        MAX(d.modified_at) as last_modified
+      FROM documents d
+      WHERE d.collection = ?
+    `).get(coll.name) as { doc_count: number; active_count: number; last_modified: string | null } | undefined;
+
+    result.push({
+      name: coll.name,
+      pwd: coll.path,
+      glob_pattern: coll.pattern,
+      doc_count: stats?.doc_count || 0,
+      active_count: stats?.active_count || 0,
+      last_modified: stats?.last_modified || null,
+    });
+  }
+
+  return result;
+}
+
+async function removeCollection(db: TursoDatabase, collectionName: string): Promise<{ deletedDocs: number; cleanedHashes: number }> {
+  // Delete from FTS search table first
+  await db.exec(`
+    DELETE FROM documents_search WHERE doc_id IN (
+      SELECT id FROM documents WHERE collection = '${collectionName}'
+    )
+  `);
+
+  // Delete documents from database
+  const docResult = await db.prepare(`DELETE FROM documents WHERE collection = ?`).run(collectionName);
+
+  // Clean up orphaned content hashes
+  const cleanupResult = await db.prepare(`
+    DELETE FROM content
+    WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)
+  `).run();
+
+  return {
+    deletedDocs: docResult.changes,
+    cleanedHashes: cleanupResult.changes
+  };
+}
+
+async function renameCollection(db: TursoDatabase, oldName: string, newName: string): Promise<void> {
+  // Update all documents with the new collection name in database
+  await db.prepare(`UPDATE documents SET collection = ? WHERE collection = ?`).run(newName, oldName);
+
+  // Update FTS table - need to update filepath which contains collection name
+  await db.exec(`
+    UPDATE documents_search
+    SET filepath = '${newName}' || substr(filepath, ${oldName.length + 1})
+    WHERE filepath LIKE '${oldName}/%'
+  `);
+}
+
+async function getAllCollections(db: TursoDatabase): Promise<{ name: string }[]> {
+  const collections = collectionsListCollections();
+  return collections.map(c => ({ name: c.name }));
+}
+
+// =============================================================================
+// Context Management
+// =============================================================================
+
+async function insertContext(db: TursoDatabase, collectionId: number, pathPrefix: string, context: string): Promise<void> {
+  // Get collection name from ID
+  const coll = await db.prepare(`SELECT collection as name FROM documents WHERE id = ? LIMIT 1`).get(collectionId) as { name: string } | undefined;
+  if (!coll) {
+    throw new Error(`Collection with id ${collectionId} not found`);
+  }
+
+  // Use collections.ts to add context
+  collectionsAddContext(coll.name, pathPrefix, context);
+}
+
+async function deleteContext(collectionName: string, pathPrefix: string): Promise<number> {
+  const success = collectionsRemoveContext(collectionName, pathPrefix);
+  return success ? 1 : 0;
+}
+
+async function deleteGlobalContexts(): Promise<number> {
+  let deletedCount = 0;
+
+  setGlobalContext(undefined);
+  deletedCount++;
+
+  const collections = collectionsListCollections();
+  for (const coll of collections) {
+    const success = collectionsRemoveContext(coll.name, '');
+    if (success) {
+      deletedCount++;
+    }
+  }
+
+  return deletedCount;
+}
+
+async function listPathContexts(): Promise<{ collection_name: string; path_prefix: string; context: string }[]> {
+  const allContexts = collectionsListAllContexts();
+
+  return allContexts.map(ctx => ({
+    collection_name: ctx.collection,
+    path_prefix: ctx.path,
+    context: ctx.context,
+  })).sort((a, b) => {
+    if (a.collection_name !== b.collection_name) {
+      return a.collection_name.localeCompare(b.collection_name);
+    }
+    if (a.path_prefix.length !== b.path_prefix.length) {
+      return b.path_prefix.length - a.path_prefix.length;
+    }
+    return a.path_prefix.localeCompare(b.path_prefix);
+  });
+}
+
 // =============================================================================
 // Vector Search
 // =============================================================================
 
-async function searchVec(db: TursoDatabase, queryEmbedding: number[], limit: number = 20, collectionName?: string): Promise<SearchResult[]> {
-  const vectorStr = toVector32String(queryEmbedding);
+async function searchVec(db: TursoDatabase, generate: () => Promise<number[] | null>, limit: number = 20, collectionName?: string): Promise<SearchResult[]> {
+  const embedding = await generate();
+  if (!embedding) {
+    return [];
+  }
+  const vectorStr = toVector32String(embedding);
 
   let sql = `
     SELECT cv.hash, cv.pos,
@@ -541,101 +1120,32 @@ async function searchVec(db: TursoDatabase, queryEmbedding: number[], limit: num
 
 async function searchFts(db: TursoDatabase, query: string, limit: number = 20, collectionName?: string): Promise<SearchResult[]> {
   // Use Turso's native FTS with fts_match for filtering and fts_score for ranking
-  // Note: FTS functions may not be available in all Turso builds (experimental feature)
-  try {
-    let sql = `
-      SELECT
-        fts_score(ds.filepath, ds.title, ds.body, ?) as score,
+  let sql = `
+      SELECT score,
         'qmd://' || d.collection || '/' || d.path as filepath,
         d.collection || '/' || d.path as display_path,
         d.title, d.hash, d.collection, content.doc as body
-      FROM documents_search ds
+      FROM (
+        SELECT 
+          fts_score(ds.filepath, ds.title, ds.body, ?1) as score,
+          doc_id
+        FROM documents_search ds
+        WHERE fts_match(ds.filepath, ds.title, ds.body, ?1)
+        ORDER BY score DESC LIMIT ?2
+      ) ds
       JOIN documents d ON d.id = ds.doc_id AND d.active = 1
       JOIN content ON content.hash = d.hash
-      WHERE fts_match(ds.filepath, ds.title, ds.body, ?)
     `;
-
-    const params: (string | number)[] = [query, query];
-    if (collectionName) {
-      sql += ` AND d.collection = ?`;
-      params.push(collectionName);
-    }
-    sql += ` ORDER BY score DESC LIMIT ?`;
-    params.push(limit);
-
-    const rows = await db.prepare(sql).all(...params) as any[];
-
-    const results: SearchResult[] = [];
-    for (const row of rows) {
-      results.push({
-        filepath: row.filepath,
-        displayPath: row.display_path,
-        title: row.title,
-        hash: row.hash,
-        docid: getDocid(row.hash),
-        collectionName: row.collection,
-        modifiedAt: "",
-        bodyLength: row.body.length,
-        body: row.body,
-        context: await getContextForFile(db, row.filepath),
-        score: row.score,
-        source: "fts",
-      });
-    }
-    return results;
-  } catch (err: any) {
-    // FTS functions not available - fall back to LIKE-based search
-    if (err?.message?.includes("no such function")) {
-      return searchFtsLikeFallback(db, query, limit, collectionName);
-    }
-    throw err;
-  }
-}
-
-// Fallback FTS using LIKE when native fts_match/fts_score are not available
-async function searchFtsLikeFallback(db: TursoDatabase, query: string, limit: number = 20, collectionName?: string): Promise<SearchResult[]> {
-  const searchTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
-  if (searchTerms.length === 0) return [];
-
-  let sql = `
-    SELECT
-      'qmd://' || d.collection || '/' || d.path as filepath,
-      d.collection || '/' || d.path as display_path,
-      d.title, d.hash, d.collection, content.doc as body
-    FROM documents d
-    JOIN content ON content.hash = d.hash
-    WHERE d.active = 1
-  `;
-
-  const params: (string | number)[] = [];
-
-  // Add LIKE conditions for each search term
-  for (const term of searchTerms) {
-    sql += ` AND (LOWER(d.title) LIKE ? OR LOWER(content.doc) LIKE ?)`;
-    params.push(`%${term}%`, `%${term}%`);
-  }
+  const params: (string | number)[] = [query, limit];
 
   if (collectionName) {
-    sql += ` AND d.collection = ?`;
+    sql += ` AND d.collection = ?3`;
     params.push(collectionName);
   }
-  sql += ` LIMIT ?`;
-  params.push(limit);
-
   const rows = await db.prepare(sql).all(...params) as any[];
 
   const results: SearchResult[] = [];
   for (const row of rows) {
-    // Compute simple relevance score based on term frequency
-    const bodyLower = row.body.toLowerCase();
-    const titleLower = row.title.toLowerCase();
-    let score = 0;
-    for (const term of searchTerms) {
-      const bodyMatches = (bodyLower.match(new RegExp(term, 'g')) || []).length;
-      const titleMatches = (titleLower.match(new RegExp(term, 'g')) || []).length;
-      score += bodyMatches + titleMatches * 2; // Title matches weighted higher
-    }
-
     results.push({
       filepath: row.filepath,
       displayPath: row.display_path,
@@ -647,13 +1157,10 @@ async function searchFtsLikeFallback(db: TursoDatabase, query: string, limit: nu
       bodyLength: row.body.length,
       body: row.body,
       context: await getContextForFile(db, row.filepath),
-      score,
+      score: row.score,
       source: "fts",
-    });
+    } as any);
   }
-
-  // Sort by score descending
-  results.sort((a, b) => b.score - a.score);
   return results;
 }
 
@@ -661,40 +1168,97 @@ async function searchFtsLikeFallback(db: TursoDatabase, query: string, limit: nu
 // Store Factory
 // =============================================================================
 
-export async function createTursoStore(db: TursoDatabase): Promise<TursoStore> {
+export async function createTursoStore(db: TursoDatabase, dbPath: string = ":memory:"): Promise<Store> {
   await initializeDatabase(db);
 
   return {
-    db,
+    db: {
+      name: 'turso',
+      db: db,
+      async exec(query, ...params) { return await db.prepare(query).run(...params); },
+      async get(query, ...params) { return await db.prepare(query).get(...params); },
+      async all(query, ...params) { return await db.prepare(query).all(...params); },
+    },
+    dbPath,
     close: () => db.close(),
+    ensureVecTable: async () => {
+      // Turso uses native vector support, no separate table needed
+    },
 
+    // Index health
     getHashesNeedingEmbedding: () => getHashesNeedingEmbedding(db),
     getIndexHealth: () => getIndexHealth(db),
+    getStatus: () => getStatus(db),
 
+    // Caching
+    getCacheKey,
     getCachedResult: (key) => getCachedResult(db, key),
     setCachedResult: (key, value) => setCachedResult(db, key, value),
     clearCache: () => clearCache(db),
 
-    getContextForFile: (fp) => getContextForFile(db, fp),
-    getCollectionByName,
+    // Cleanup and maintenance
+    deleteLLMCache: () => deleteLLMCache(db),
+    deleteInactiveDocuments: () => deleteInactiveDocuments(db),
+    cleanupOrphanedContent: () => cleanupOrphanedContent(db),
+    cleanupOrphanedVectors: () => cleanupOrphanedVectors(db),
+    vacuumDatabase: () => vacuumDatabase(db),
 
+    // Context
+    getContextForFile: (fp) => getContextForFile(db, fp),
+    getContextForPath: (collectionName, path) => getContextForPath(db, collectionName, path),
+    getCollectionByName,
+    getCollectionsWithoutContext: () => getCollectionsWithoutContext(db),
+    getTopLevelPathsWithoutContext: (collectionName) => getTopLevelPathsWithoutContext(db, collectionName),
+
+    // Virtual paths
+    parseVirtualPath,
+    buildVirtualPath,
+    isVirtualPath,
+    resolveVirtualPath,
+    toVirtualPath: (absolutePath) => toVirtualPath(db, absolutePath),
+
+    // Search
+    searchFTS: (q, lim, coll) => searchFts(db, q, lim, coll ? String(coll) : undefined),
+    searchVec: (generate, lim, coll) => searchVec(db, generate, lim, coll),
+
+    // Query expansion & reranking
+    expandQuery: (query, model) => expandQuery(db, query, model),
+    rerank: (query, documents, model) => rerank(db, query, documents, model),
+
+    // Document retrieval
     findDocument: (fn, opts) => findDocument(db, fn, opts),
     getDocumentBody: (doc, from, max) => getDocumentBody(db, doc, from, max),
+    findDocuments: (pattern, opts) => findDocuments(db, pattern, opts),
 
+    // Fuzzy matching and docid lookup
     findSimilarFiles: (q, dist, lim) => findSimilarFiles(db, q, dist, lim),
+    matchFilesByGlob: (pattern) => matchFilesByGlob(db, pattern),
     findDocumentByDocid: (id) => findDocumentByDocid(db, id),
 
+    // Document indexing operations
     insertContent: (h, c, t) => insertContent(db, h, c, t),
     insertDocument: (coll, path, title, hash, created, modified) => insertDocument(db, coll, path, title, hash, created, modified),
     findActiveDocument: (coll, path) => findActiveDocument(db, coll, path),
+    updateDocumentTitle: (documentId, title, modifiedAt) => updateDocumentTitle(db, documentId, title, modifiedAt),
+    updateDocument: (documentId, title, hash, modifiedAt) => updateDocument(db, documentId, title, hash, modifiedAt),
     deactivateDocument: (coll, path) => deactivateDocument(db, coll, path),
     getActiveDocumentPaths: (coll) => getActiveDocumentPaths(db, coll),
 
+    // Vector/embedding operations
     insertEmbedding: (h, s, p, e, m, t) => insertEmbedding(db, h, s, p, e, m, t),
     getHashesForEmbedding: () => getHashesForEmbedding(db),
     clearAllEmbeddings: () => clearAllEmbeddings(db),
 
-    searchVec: (emb, lim, coll) => searchVec(db, emb, lim, coll),
-    searchFts: (q, lim, coll) => searchFts(db, q, lim, coll),
+    // Collection management
+    listCollections: () => listCollections(db),
+    removeCollection: (name) => removeCollection(db, name),
+    renameCollection: (oldName, newName) => renameCollection(db, oldName, newName),
+    getAllCollections: () => getAllCollections(db),
+
+    // Context management
+    insertContext: (collectionId, pathPrefix, context) => insertContext(db, collectionId, pathPrefix, context),
+    deleteContext: (collectionName, pathPrefix) => deleteContext(collectionName, pathPrefix),
+    deleteGlobalContexts: () => deleteGlobalContexts(),
+    listPathContexts: () => listPathContexts(),
   };
 }

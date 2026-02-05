@@ -91,8 +91,8 @@ function setIndexName(name: string | null): void {
   closeDb();
 }
 
-function ensureVecTable(dimensions: number): void {
-  getStore().ensureVecTable(dimensions);
+async function ensureVecTable(dimensions: number): Promise<void> {
+  await getStore().ensureVecTable(dimensions);
 }
 
 // Terminal colors (respects NO_COLOR env)
@@ -143,8 +143,8 @@ function formatETA(seconds: number): string {
 
 
 // Check index health and print warnings/tips
-function checkIndexHealth(store: Store): void {
-  const { needsEmbedding, totalDocs, daysStale } = store.getIndexHealth();
+async function checkIndexHealth(store: Store): Promise<void> {
+  const { needsEmbedding, totalDocs, daysStale } = await store.getIndexHealth();
 
   // Warn if many docs need embedding
   if (needsEmbedding > 0) {
@@ -239,7 +239,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-function showStatus(): void {
+async function showStatus(): Promise<void> {
   const dbPath = getDbPath();
   const store = getStore();
 
@@ -254,15 +254,15 @@ function showStatus(): void {
   } catch { }
 
   // Collections info (from YAML + database stats)
-  const collections = store.listCollections();
+  const collections = await store.listCollections();
 
   // Overall stats
-  const totalDocs = store.db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number };
-  const vectorCount = store.db.prepare(`SELECT COUNT(*) as count FROM content_vectors`).get() as { count: number };
-  const needsEmbedding = store.getHashesNeedingEmbedding();
+  const totalDocs = await store.db.get(`SELECT COUNT(*) as count FROM documents WHERE active = 1`) as { count: number };
+  const vectorCount = await store.db.get(`SELECT COUNT(*) as count FROM content_vectors`) as { count: number };
+  const needsEmbedding = await store.getHashesNeedingEmbedding();
 
   // Most recent update across all collections
-  const mostRecent = store.db.prepare(`SELECT MAX(modified_at) as latest FROM documents WHERE active = 1`).get() as { latest: string | null };
+  const mostRecent = await store.db.get(`SELECT MAX(modified_at) as latest FROM documents WHERE active = 1`) as { latest: string | null };
 
   console.log(`${c.bold}QMD Status${c.reset}\n`);
   console.log(`Index: ${dbPath}`);
@@ -343,9 +343,9 @@ async function updateCollections(): Promise<void> {
   // Collections are defined in YAML; no duplicate cleanup needed.
 
   // Clear Ollama cache on update
-  store.clearCache();
+  await store.clearCache();
 
-  const collections = store.listCollections();
+  const collections = await store.listCollections();
 
   if (collections.length === 0) {
     console.log(`${c.dim}No collections found. Run 'qmd collection add .' to index markdown files.${c.reset}`);
@@ -399,7 +399,7 @@ async function updateCollections(): Promise<void> {
 
   // Check if any documents need embedding (show once at end)
   const finalStore = getStore();
-  const needsEmbedding = finalStore.getHashesNeedingEmbedding();
+  const needsEmbedding = await finalStore.getHashesNeedingEmbedding();
   closeDb();
 
   console.log(`${c.green}✓ All collections updated.${c.reset}`);
@@ -585,14 +585,14 @@ function contextRemove(pathArg: string): void {
   console.log(`${c.green}✓${c.reset} Removed context for: qmd://${detected.collectionName}/${detected.relativePath}`);
 }
 
-function contextCheck(): void {
+async function contextCheck(): Promise<void> {
   const store = getStore();
 
   // Get collections without any context
-  const collectionsWithoutContext = store.getCollectionsWithoutContext();
+  const collectionsWithoutContext = await store.getCollectionsWithoutContext();
 
   // Get all collections to check for missing path contexts
-  const allCollections = store.listCollections();
+  const allCollections = await store.listCollections();
 
   if (collectionsWithoutContext.length === 0 && allCollections.length > 0) {
     // Check if all collections have contexts
@@ -617,7 +617,7 @@ function contextCheck(): void {
 
   for (const coll of collectionsWithContext) {
     if (!coll) continue;
-    const missingPaths = store.getTopLevelPathsWithoutContext(coll.name);
+    const missingPaths = await store.getTopLevelPathsWithoutContext(coll.name);
 
     if (missingPaths.length > 0) {
       if (!hasPathSuggestions) {
@@ -642,7 +642,7 @@ function contextCheck(): void {
   closeDb();
 }
 
-function getDocument(filename: string, fromLine?: number, maxLines?: number, lineNumbers?: boolean): void {
+async function getDocument(filename: string, fromLine?: number, maxLines?: number, lineNumbers?: boolean): Promise<void> {
   const store = getStore();
 
   // Parse :linenum suffix from filename (e.g., "file.md:100")
@@ -658,7 +658,7 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
 
   // Handle docid lookup (#abc123, abc123, "#abc123", "abc123", etc.)
   if (isDocid(inputPath)) {
-    const docidMatch = store.findDocumentByDocid(inputPath);
+    const docidMatch = await store.findDocumentByDocid(inputPath);
     if (docidMatch) {
       inputPath = docidMatch.filepath;
     } else {
@@ -681,22 +681,22 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
     }
 
     // Try exact match on collection + path
-    doc = store.db.prepare(`
+    doc = await store.db.get(`
       SELECT d.collection as collectionName, d.path, content.doc as body
       FROM documents d
       JOIN content ON content.hash = d.hash
       WHERE d.collection = ? AND d.path = ? AND d.active = 1
-    `).get(parsed.collectionName, parsed.path) as typeof doc;
+    `, parsed.collectionName, parsed.path) as typeof doc;
 
     if (!doc) {
       // Try fuzzy match by path ending
-      doc = store.db.prepare(`
+      doc = await store.db.get(`
         SELECT d.collection as collectionName, d.path, content.doc as body
         FROM documents d
         JOIN content ON content.hash = d.hash
         WHERE d.collection = ? AND d.path LIKE ? AND d.active = 1
         LIMIT 1
-      `).get(parsed.collectionName, `%${parsed.path}`) as typeof doc;
+      `, parsed.collectionName, `%${parsed.path}`) as typeof doc;
     }
 
     virtualPath = inputPath;
@@ -710,28 +710,28 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
         const possiblePath = parts.slice(1).join('/');
 
         // Check if this collection exists
-        const collExists = possibleCollection ? store.db.prepare(`
+        const collExists = possibleCollection ? await store.db.get(`
           SELECT 1 FROM documents WHERE collection = ? AND active = 1 LIMIT 1
-        `).get(possibleCollection) : null;
+        `, possibleCollection) : null;
 
         if (collExists) {
           // Try exact match on collection + path
-          doc = store.db.prepare(`
+          doc = await store.db.get(`
             SELECT d.collection as collectionName, d.path, content.doc as body
             FROM documents d
             JOIN content ON content.hash = d.hash
             WHERE d.collection = ? AND d.path = ? AND d.active = 1
-          `).get(possibleCollection || "", possiblePath || "") as { collectionName: string; path: string; body: string } | null;
+          `, possibleCollection || "", possiblePath || "") as { collectionName: string; path: string; body: string } | null;
 
           if (!doc) {
             // Try fuzzy match by path ending
-            doc = store.db.prepare(`
+            doc = await store.db.get(`
               SELECT d.collection as collectionName, d.path, content.doc as body
               FROM documents d
               JOIN content ON content.hash = d.hash
               WHERE d.collection = ? AND d.path LIKE ? AND d.active = 1
               LIMIT 1
-            `).get(possibleCollection || "", `%${possiblePath}`) as { collectionName: string; path: string; body: string } | null;
+            `, possibleCollection || "", `%${possiblePath}`) as { collectionName: string; path: string; body: string } | null;
           }
 
           if (doc) {
@@ -760,24 +760,24 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
 
       if (detected) {
         // Found collection - query by collection name + relative path
-        doc = store.db.prepare(`
+        doc = await store.db.get(`
           SELECT d.collection as collectionName, d.path, content.doc as body
           FROM documents d
           JOIN content ON content.hash = d.hash
           WHERE d.collection = ? AND d.path = ? AND d.active = 1
-        `).get(detected.collectionName, detected.relativePath) as { collectionName: string; path: string; body: string } | null;
+        `, detected.collectionName, detected.relativePath) as { collectionName: string; path: string; body: string } | null;
       }
 
       // Fuzzy match by filename (last component of path)
       if (!doc) {
         const fname = inputPath.split('/').pop() || inputPath;
-        doc = store.db.prepare(`
+        doc = await store.db.get(`
           SELECT d.collection as collectionName, d.path, content.doc as body
           FROM documents d
           JOIN content ON content.hash = d.hash
           WHERE d.path LIKE ? AND d.active = 1
           LIMIT 1
-        `).get(`%${fname}`) as { collectionName: string; path: string; body: string } | null;
+        `, `%${fname}`) as { collectionName: string; path: string; body: string } | null;
       }
 
       if (doc) {
@@ -823,7 +823,7 @@ function getDocument(filename: string, fromLine?: number, maxLines?: number, lin
 }
 
 // Multi-get: fetch multiple documents by glob pattern or comma-separated list
-function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT_MULTI_GET_MAX_BYTES, format: OutputFormat = "cli"): void {
+async function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT_MULTI_GET_MAX_BYTES, format: OutputFormat = "cli"): Promise<void> {
   const store = getStore();
 
   // Check if it's a comma-separated list or a glob pattern
@@ -843,7 +843,7 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
         const parsed = parseVirtualPath(name);
         if (parsed) {
           // Try exact match on collection + path
-          doc = store.db.prepare(`
+          doc = await store.db.get(`
             SELECT
               'qmd://' || d.collection || '/' || d.path as virtual_path,
               LENGTH(content.doc) as body_length,
@@ -852,11 +852,11 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
             FROM documents d
             JOIN content ON content.hash = d.hash
             WHERE d.collection = ? AND d.path = ? AND d.active = 1
-          `).get(parsed.collectionName, parsed.path) as typeof doc;
+          `, parsed.collectionName, parsed.path) as typeof doc;
         }
       } else {
         // Try exact match on path
-        doc = store.db.prepare(`
+        doc = await store.db.get(`
           SELECT
             'qmd://' || d.collection || '/' || d.path as virtual_path,
             LENGTH(content.doc) as body_length,
@@ -866,11 +866,11 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
           JOIN content ON content.hash = d.hash
           WHERE d.path = ? AND d.active = 1
           LIMIT 1
-        `).get(name) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
+        `, name) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
 
         // Try suffix match
         if (!doc) {
-          doc = store.db.prepare(`
+          doc = await store.db.get(`
             SELECT
               'qmd://' || d.collection || '/' || d.path as virtual_path,
               LENGTH(content.doc) as body_length,
@@ -880,7 +880,7 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
             JOIN content ON content.hash = d.hash
             WHERE d.path LIKE ? AND d.active = 1
             LIMIT 1
-          `).get(`%${name}`) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
+          `, `%${name}`) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
         }
       }
 
@@ -898,7 +898,7 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
     }
   } else {
     // Glob pattern - matchFilesByGlob now returns virtual paths
-    files = store.matchFilesByGlob(pattern).map(f => ({
+    files = (await store.matchFilesByGlob(pattern)).map(f => ({
       ...f,
       collection: undefined,  // Will be fetched later if needed
       path: undefined
@@ -927,7 +927,7 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
     }
 
     // Get context using collection-scoped function
-    const context = collection && path ? store.getContextForPath(collection, path) : null;
+    const context = collection && path ? await store.getContextForPath(collection, path) : null;
 
     // Check size limit
     if (file.bodyLength > maxBytes) {
@@ -946,12 +946,12 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
     // Fetch document content using collection and path
     if (!collection || !path) continue;
 
-    const doc = store.db.prepare(`
+    const doc = await store.db.get(`
       SELECT content.doc as body, d.title
       FROM documents d
       JOIN content ON content.hash = d.hash
       WHERE d.collection = ? AND d.path = ? AND d.active = 1
-    `).get(collection, path) as { body: string; title: string } | null;
+    `, collection, path) as { body: string; title: string } | null;
 
     if (!doc) continue;
 
@@ -1057,7 +1057,7 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
 }
 
 // List files in virtual file tree
-function listFiles(pathArg?: string): void {
+async function listFiles(pathArg?: string): Promise<void> {
   const store = getStore();
 
   if (!pathArg) {
@@ -1071,18 +1071,18 @@ function listFiles(pathArg?: string): void {
     }
 
     // Get file counts from database for each collection
-    const collections = yamlCollections.map(coll => {
-      const stats = store.db.prepare(`
+    const collections = [];
+    for (const coll of yamlCollections) {
+      const stats = await store.db.get(`
         SELECT COUNT(*) as file_count
         FROM documents d
         WHERE d.collection = ? AND d.active = 1
-      `).get(coll.name) as { file_count: number } | null;
-
-      return {
+      `, coll.name) as { file_count: number } | null;
+      collections.push({
         name: coll.name,
         file_count: stats?.file_count || 0
-      };
-    });
+      });
+    }
 
     console.log(`${c.bold}Collections:${c.reset}\n`);
     for (const coll of collections) {
@@ -1150,7 +1150,7 @@ function listFiles(pathArg?: string): void {
     params = [coll.name];
   }
 
-  const files = store.db.prepare(query).all(...params) as { path: string; title: string; modified_at: string; size: number }[];
+  const files = await store.db.all(query, ...params) as { path: string; title: string; modified_at: string; size: number }[];
 
   if (files.length === 0) {
     if (pathPrefix) {
@@ -1199,9 +1199,9 @@ function formatLsTime(date: Date): string {
 }
 
 // Collection management commands
-function collectionList(): void {
+async function collectionList(): Promise<void> {
   const store = getStore();
-  const collections = store.listCollections();
+  const collections = await store.listCollections();
 
   if (collections.length === 0) {
     console.log("No collections found. Run 'qmd add .' to create one.");
@@ -1263,7 +1263,7 @@ async function collectionAdd(pwd: string, globPattern: string, name?: string): P
   console.log(`${c.green}✓${c.reset} Collection '${collName}' created successfully`);
 }
 
-function collectionRemove(name: string): void {
+async function collectionRemove(name: string): Promise<void> {
   // Check if collection exists in YAML
   const coll = getCollectionFromYaml(name);
   if (!coll) {
@@ -1273,7 +1273,7 @@ function collectionRemove(name: string): void {
   }
 
   const store = getStore();
-  const result = store.removeCollection(name);
+  const result = await store.removeCollection(name);
   closeDb();
 
   console.log(`${c.green}✓${c.reset} Removed collection '${name}'`);
@@ -1283,7 +1283,7 @@ function collectionRemove(name: string): void {
   }
 }
 
-function collectionRename(oldName: string, newName: string): void {
+async function collectionRename(oldName: string, newName: string): Promise<void> {
   // Check if old collection exists in YAML
   const coll = getCollectionFromYaml(oldName);
   if (!coll) {
@@ -1301,7 +1301,7 @@ function collectionRename(oldName: string, newName: string): void {
   }
 
   const store = getStore();
-  store.renameCollection(oldName, newName);
+  await store.renameCollection(oldName, newName);
   closeDb();
 
   console.log(`${c.green}✓${c.reset} Renamed collection '${oldName}' to '${newName}'`);
@@ -1315,7 +1315,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   const excludeDirs = ["node_modules", ".git", ".cache", "vendor", "dist", "build"];
 
   // Clear Ollama cache on index
-  store.clearCache();
+  await store.clearCache();
 
   // Collection name must be provided (from YAML)
   if (!collectionName) {
@@ -1369,31 +1369,31 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
     const title = extractTitle(content, relativeFile);
 
     // Check if document exists in this collection with this path
-    const existing = store.findActiveDocument(collectionName, path);
+    const existing = await store.findActiveDocument(collectionName, path);
 
     if (existing) {
       if (existing.hash === hash) {
         // Hash unchanged, but check if title needs updating
         if (existing.title !== title) {
-          store.updateDocumentTitle(existing.id, title, now);
+          await store.updateDocumentTitle(existing.id, title, now);
           updated++;
         } else {
           unchanged++;
         }
       } else {
         // Content changed - insert new content hash and update document
-        store.insertContent(hash, content, now);
+        await store.insertContent(hash, content, now);
         const stat = statSync(filepath);
-        store.updateDocument(existing.id, title, hash,
+        await store.updateDocument(existing.id, title, hash,
           stat ? new Date(stat.mtime).toISOString() : now);
         updated++;
       }
     } else {
       // New document - insert content and document
       indexed++;
-      store.insertContent(hash, content, now);
+      await store.insertContent(hash, content, now);
       const stat = statSync(filepath);
-      store.insertDocument(collectionName, path, title, hash,
+      await store.insertDocument(collectionName, path, title, hash,
         stat ? new Date(stat.birthtime).toISOString() : now,
         stat ? new Date(stat.mtime).toISOString() : now);
     }
@@ -1408,20 +1408,20 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   }
 
   // Deactivate documents in this collection that no longer exist
-  const allActive = store.getActiveDocumentPaths(collectionName);
+  const allActive = await store.getActiveDocumentPaths(collectionName);
   let removed = 0;
   for (const docPath of allActive) {
     if (!seenPaths.has(docPath)) {
-      store.deactivateDocument(collectionName, docPath);
+      await store.deactivateDocument(collectionName, docPath);
       removed++;
     }
   }
 
   // Clean up orphaned content hashes (content not referenced by any document)
-  const orphanedContent = store.cleanupOrphanedContent();
+  const orphanedContent = await store.cleanupOrphanedContent();
 
   // Check if vector index needs updating
-  const needsEmbedding = store.getHashesNeedingEmbedding();
+  const needsEmbedding = await store.getHashesNeedingEmbedding();
 
   progress.clear();
   console.log(`\nIndexed: ${indexed} new, ${updated} updated, ${unchanged} unchanged, ${removed} removed`);
@@ -1450,11 +1450,11 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   // If force, clear all vectors
   if (force) {
     console.log(`${c.yellow}Force re-indexing: clearing all vectors...${c.reset}`);
-    store.clearAllEmbeddings();
+    await store.clearAllEmbeddings();
   }
 
   // Find unique hashes that need embedding (from active documents)
-  const hashesToEmbed = store.getHashesForEmbedding();
+  const hashesToEmbed = await store.getHashesForEmbedding();
 
   if (hashesToEmbed.length === 0) {
     console.log(`${c.green}✓ All content hashes already have embeddings.${c.reset}`);
@@ -1527,7 +1527,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     if (!firstResult) {
       throw new Error("Failed to get embedding dimensions from first chunk");
     }
-    ensureVecTable(firstResult.embedding.length);
+    await ensureVecTable(firstResult.embedding.length);
 
     let chunksEmbedded = 0, errors = 0, bytesProcessed = 0;
     const startTime = Date.now();
@@ -1553,7 +1553,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
           const embedding = embeddings[i];
 
           if (embedding) {
-            store.insertEmbedding(chunk.hash, chunk.seq, chunk.pos, new Float32Array(embedding.embedding), model, now);
+            await store.insertEmbedding(chunk.hash, chunk.seq, chunk.pos, new Float32Array(embedding.embedding), model, now);
             chunksEmbedded++;
           } else {
             errors++;
@@ -1568,7 +1568,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
             const text = formatDocForEmbedding(chunk.text, chunk.title);
             const result = await session.embed(text);
             if (result) {
-              store.insertEmbedding(chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now);
+              await store.insertEmbedding(chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now);
               chunksEmbedded++;
             } else {
               errors++;
@@ -1822,7 +1822,7 @@ function outputResults(results: { file: string; displayPath: string; title: stri
       console.log();
 
       // Snippet with highlighting (diff-style header included)
-      let displaySnippet = opts.lineNumbers ? addLineNumbers(snippet, line) : snippet;
+      const displaySnippet = opts.lineNumbers ? addLineNumbers(snippet, line) : snippet;
       const highlighted = highlightTerms(displaySnippet, query);
       console.log(highlighted);
 
@@ -1870,7 +1870,7 @@ function outputResults(results: { file: string; displayPath: string; title: stri
   }
 }
 
-function search(query: string, opts: OutputOptions): void {
+async function search(query: string, opts: OutputOptions): Promise<void> {
   const store = getStore();
 
   // Validate collection filter if specified
@@ -1888,19 +1888,22 @@ function search(query: string, opts: OutputOptions): void {
   // Use large limit for --all, otherwise fetch more than needed and let outputResults filter
   const fetchLimit = opts.all ? 100000 : Math.max(50, opts.limit * 2);
   // searchFTS accepts collection name as number parameter for legacy reasons (will be fixed in store.ts)
-  const results = store.searchFTS(query, fetchLimit, collectionName as any);
+  const results = await store.searchFTS(query, fetchLimit, collectionName as any);
 
   // Add context to results
-  const resultsWithContext = results.map(r => ({
-    file: r.filepath,
-    displayPath: r.displayPath,
-    title: r.title,
-    body: r.body || "",
-    score: r.score,
-    context: store.getContextForFile(r.filepath),
-    hash: r.hash,
-    docid: r.docid,
-  }));
+  const resultsWithContext = [];
+  for (const r of results) {
+    resultsWithContext.push({
+      file: r.filepath,
+      displayPath: r.displayPath,
+      title: r.title,
+      body: r.body || "",
+      score: r.score,
+      context: await store.getContextForFile(r.filepath),
+      hash: r.hash,
+      docid: r.docid,
+    });
+  }
 
   closeDb();
 
@@ -1926,7 +1929,7 @@ async function vectorSearch(query: string, opts: OutputOptions, model: string = 
     collectionName = opts.collection;
   }
 
-  const tableExists = store.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
+  const tableExists = store.db.get(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`);
   if (!tableExists) {
     console.error("Vector index not found. Run 'qmd embed' first to create embeddings.");
     closeDb();
@@ -1934,7 +1937,7 @@ async function vectorSearch(query: string, opts: OutputOptions, model: string = 
   }
 
   // Check index health and warn about issues
-  checkIndexHealth(store);
+  await checkIndexHealth(store);
 
   // Wrap LLM operations in a session for lifecycle management
   await withLLMSession(async (session) => {
@@ -1972,10 +1975,10 @@ async function vectorSearch(query: string, opts: OutputOptions, model: string = 
     }
 
     // Sort by max score and limit to requested count
-    const results = Array.from(allResults.values())
-      .sort((a, b) => b.score - a.score)
-      .slice(0, opts.limit)
-      .map(r => ({ ...r, context: store.getContextForFile(r.file) }));
+    const results = [];
+    for (const r of Array.from(allResults.values()).sort((a, b) => b.score - a.score).slice(0, opts.limit)) {
+      results.push({ ...r, context: await store.getContextForFile(r.file) });
+    }
 
     closeDb();
 
@@ -2041,11 +2044,11 @@ async function querySearch(query: string, opts: OutputOptions, embedModel: strin
   }
 
   // Check index health and warn about issues
-  checkIndexHealth(store);
+  await checkIndexHealth(store);
 
   // Run initial BM25 search (will be reused for retrieval)
-  const initialFts = store.searchFTS(query, 20, collectionName as any);
-  let hasVectors = !!store.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
+  const initialFts = await store.searchFTS(query, 20, collectionName as any);
+  const hasVectors = !!await store.db.get(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`);
 
   // Check if initial results have strong signals (skip expansion if so)
   // Strong signal = top result is strong AND clearly separated from runner-up.
@@ -2056,8 +2059,8 @@ async function querySearch(query: string, opts: OutputOptions, embedModel: strin
 
   // Wrap LLM operations in a session for lifecycle management
   await withLLMSession(async (session) => {
-    let ftsQueries: string[] = [query];
-    let vectorQueries: string[] = [query];
+    const ftsQueries: string[] = [query];
+    const vectorQueries: string[] = [query];
 
     if (hasStrongSignal) {
       // Strong BM25 signal - skip expensive LLM expansion
@@ -2097,7 +2100,7 @@ async function querySearch(query: string, opts: OutputOptions, embedModel: strin
     for (const q of ftsQueries) {
       if (!q) continue;
       searchPromises.push((async () => {
-        const ftsResults = store.searchFTS(q, 20, (collectionName || "") as any);
+        const ftsResults = await store.searchFTS(q, 20, (collectionName || "") as any);
         if (ftsResults.length > 0) {
           for (const r of ftsResults) {
             // Mutex for hashMap is not strictly needed as it's just adding values
@@ -2184,7 +2187,8 @@ async function querySearch(query: string, opts: OutputOptions, embedModel: strin
     const candidateMap = new Map(candidates.map(cand => [cand.file, { displayPath: cand.displayPath, title: cand.title, body: cand.body }]));
     const rrfRankMap = new Map(candidates.map((cand, i) => [cand.file, i + 1])); // 1-indexed rank
 
-    const finalResults = Array.from(aggregatedScores.entries()).map(([file, { score: rerankScore, bestChunkIdx }]) => {
+    const finalResults = [];
+    for (const [file, { score: rerankScore, bestChunkIdx }] of Array.from(aggregatedScores.entries())) {
       const rrfRank = rrfRankMap.get(file) || 30;
       // Position-aware blending: top retrieval results preserved more
       // Rank 1-3: 75% RRF, 25% reranker (trust retrieval for exact matches)
@@ -2205,17 +2209,19 @@ async function querySearch(query: string, opts: OutputOptions, embedModel: strin
       const chunkInfo = docChunkMap.get(file);
       const chunkBody = chunkInfo ? (chunkInfo.chunks[bestChunkIdx]?.text || chunkInfo.chunks[0]!.text) : candidate?.body || "";
       const chunkPos = chunkInfo ? (chunkInfo.chunks[bestChunkIdx]?.pos || 0) : 0;
-      return {
+      finalResults.push({
         file,
         displayPath: candidate?.displayPath || "",
         title: candidate?.title || "",
         body: chunkBody,
         chunkPos,
         score: blendedScore,
-        context: store.getContextForFile(file),
+        context: await store.getContextForFile(file),
         hash: hashMap.get(file) || "",
-      };
-    }).sort((a, b) => b.score - a.score);
+      });
+    }
+    finalResults.sort((a, b) => b.score - a.score);
+
 
     // Deduplicate by file (safety net - shouldn't happen but prevents duplicate output)
     const seenFiles = new Set<string>();
@@ -2432,7 +2438,7 @@ if (import.meta.main) {
         }
 
         case "check": {
-          contextCheck();
+          await contextCheck();
           break;
         }
 
@@ -2464,7 +2470,7 @@ if (import.meta.main) {
       }
       const fromLine = cli.values.from ? parseInt(cli.values.from as string, 10) : undefined;
       const maxLines = cli.values.l ? parseInt(cli.values.l as string, 10) : undefined;
-      getDocument(cli.args[0], fromLine, maxLines, cli.opts.lineNumbers);
+      await getDocument(cli.args[0], fromLine, maxLines, cli.opts.lineNumbers);
       break;
     }
 
@@ -2476,12 +2482,12 @@ if (import.meta.main) {
       }
       const maxLinesMulti = cli.values.l ? parseInt(cli.values.l as string, 10) : undefined;
       const maxBytes = cli.values["max-bytes"] ? parseInt(cli.values["max-bytes"] as string, 10) : DEFAULT_MULTI_GET_MAX_BYTES;
-      multiGet(cli.args[0], maxLinesMulti, maxBytes, cli.opts.format);
+      await multiGet(cli.args[0], maxLinesMulti, maxBytes, cli.opts.format);
       break;
     }
 
     case "ls": {
-      listFiles(cli.args[0]);
+      await listFiles(cli.args[0]);
       break;
     }
 
@@ -2489,7 +2495,7 @@ if (import.meta.main) {
       const subcommand = cli.args[0];
       switch (subcommand) {
         case "list": {
-          collectionList();
+          await collectionList();
           break;
         }
 
@@ -2510,7 +2516,7 @@ if (import.meta.main) {
             console.error("  Use 'qmd collection list' to see available collections");
             process.exit(1);
           }
-          collectionRemove(cli.args[1]);
+          await collectionRemove(cli.args[1]);
           break;
         }
 
@@ -2521,7 +2527,7 @@ if (import.meta.main) {
             console.error("  Use 'qmd collection list' to see available collections");
             process.exit(1);
           }
-          collectionRename(cli.args[1], cli.args[2]);
+          await collectionRename(cli.args[1], cli.args[2]);
           break;
         }
 
@@ -2534,7 +2540,7 @@ if (import.meta.main) {
     }
 
     case "status":
-      showStatus();
+      await showStatus();
       break;
 
     case "update":
@@ -2570,7 +2576,7 @@ if (import.meta.main) {
         console.error("Usage: qmd search [options] <query>");
         process.exit(1);
       }
-      search(cli.query, cli.opts);
+      await search(cli.query, cli.opts);
       break;
 
     case "vsearch":
@@ -2607,7 +2613,7 @@ if (import.meta.main) {
       console.log(`${c.green}✓${c.reset} Cleared ${cacheCount} cached API responses`);
 
       // 2. Remove orphaned vectors
-      const orphanedVecs = store.cleanupOrphanedVectors();
+      const orphanedVecs = await store.cleanupOrphanedVectors();
       if (orphanedVecs > 0) {
         console.log(`${c.green}✓${c.reset} Removed ${orphanedVecs} orphaned embedding chunks`);
       } else {
@@ -2615,13 +2621,13 @@ if (import.meta.main) {
       }
 
       // 3. Remove inactive documents
-      const inactiveDocs = store.deleteInactiveDocuments();
+      const inactiveDocs = await store.deleteInactiveDocuments();
       if (inactiveDocs > 0) {
         console.log(`${c.green}✓${c.reset} Removed ${inactiveDocs} inactive document records`);
       }
 
       // 4. Vacuum to reclaim space
-      store.vacuumDatabase();
+      await store.vacuumDatabase();
       console.log(`${c.green}✓${c.reset} Database vacuumed`);
 
       closeDb();

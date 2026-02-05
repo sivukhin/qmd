@@ -22,7 +22,7 @@ import type { CollectionConfig } from "./collections";
 // =============================================================================
 
 let testStore: Store;
-let testDb: Database;
+let testDb: StoreDb;
 let testDbPath: string;
 let testConfigDir: string;
 
@@ -31,12 +31,14 @@ afterAll(async () => {
   await disposeDefaultLlamaCpp();
 });
 
-function initTestDatabase(db: Database): void {
-  sqliteVec.load(db);
-  db.exec("PRAGMA journal_mode = WAL");
+async function initTestDatabase(db: StoreDb): Promise<void> {
+  if (db.name == 'sqlite3') {
+    sqliteVec.load(db.db);
+  }
+  await db.exec("PRAGMA journal_mode = WAL");
 
   // Content-addressable storage - the source of truth for document content
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS content (
       hash TEXT PRIMARY KEY,
       doc TEXT NOT NULL,
@@ -46,7 +48,7 @@ function initTestDatabase(db: Database): void {
 
   // Documents table - file system layer mapping virtual paths to content hashes
   // Collections are now managed in YAML config
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS documents (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       collection TEXT NOT NULL,
@@ -61,10 +63,10 @@ function initTestDatabase(db: Database): void {
     )
   `);
 
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection, active)`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection, active)`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash)`);
 
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS llm_cache (
       hash TEXT PRIMARY KEY,
       result TEXT NOT NULL,
@@ -72,7 +74,7 @@ function initTestDatabase(db: Database): void {
     )
   `);
 
-  db.exec(`
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS content_vectors (
       hash TEXT NOT NULL,
       seq INTEGER NOT NULL DEFAULT 0,
@@ -83,7 +85,7 @@ function initTestDatabase(db: Database): void {
     )
   `);
 
-  db.exec(`
+  await db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
       name, body,
       content='documents',
@@ -92,7 +94,7 @@ function initTestDatabase(db: Database): void {
     )
   `);
 
-  db.exec(`
+  await db.exec(`
     CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
       INSERT INTO documents_fts(rowid, name, body)
       SELECT new.id, new.path, content.doc
@@ -102,10 +104,10 @@ function initTestDatabase(db: Database): void {
   `);
 
   // Create vector table
-  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding float[768] distance_metric=cosine)`);
+  await db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding float[768] distance_metric=cosine)`);
 }
 
-function seedTestData(db: Database): void {
+async function seedTestData(db: StoreDb): Promise<void> {
   const now = new Date().toISOString();
 
   // Note: Collections are now managed in YAML config, not in database
@@ -147,16 +149,16 @@ function seedTestData(db: Database): void {
 
   for (const doc of docs) {
     // Insert content first
-    db.prepare(`
+    await db.exec(`
       INSERT OR IGNORE INTO content (hash, doc, created_at)
       VALUES (?, ?, ?)
-    `).run(doc.hash, doc.body, now);
+    `, doc.hash, doc.body, now);
 
     // Then insert document metadata
-    db.prepare(`
+    await db.exec(`
       INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
       VALUES ('docs', ?, ?, ?, ?, ?, 1)
-    `).run(doc.path, doc.title, doc.hash, now, now);
+    `, doc.path, doc.title, doc.hash, now, now);
   }
 
   // Add embeddings for vector search
@@ -164,8 +166,8 @@ function seedTestData(db: Database): void {
   for (let i = 0; i < 768; i++) embedding[i] = Math.random();
 
   for (const doc of docs.slice(0, 4)) { // Skip large file for embeddings
-    db.prepare(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'embeddinggemma', ?)`).run(doc.hash, now);
-    db.prepare(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(`${doc.hash}_0`, embedding);
+    await db.exec(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'embeddinggemma', ?)`, doc.hash, now);
+    await db.exec(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`, `${doc.hash}_0`, embedding);
   }
 }
 
@@ -188,6 +190,7 @@ import {
 } from "./store";
 import type { RankedResult } from "./store";
 import { getQueryEmbedding } from "./store_util";
+import type { StoreDb } from "./store_types";
 // Note: searchResultsToMcpCsv no longer used in MCP - using structuredContent instead
 
 // =============================================================================
@@ -222,8 +225,8 @@ describe("MCP Server", () => {
     testDbPath = `/tmp/qmd-mcp-test-${Date.now()}.sqlite`;
     testStore = createStore(testDbPath);
     testDb = testStore.db;
-    initTestDatabase(testDb);
-    seedTestData(testDb);
+    await initTestDatabase(testDb);
+    await seedTestData(testDb);
   });
 
   afterAll(async () => {
@@ -249,33 +252,33 @@ describe("MCP Server", () => {
   // ===========================================================================
 
   describe("qmd_search tool", () => {
-    test("returns results for matching query", () => {
-      const results = testStore.searchFTS("readme", 10);
+    test("returns results for matching query", async () => {
+      const results = await testStore.searchFTS("readme", 10);
       expect(results.length).toBeGreaterThan(0);
       expect(results[0]!.displayPath).toBe("docs/readme.md");
     });
 
-    test("returns empty for non-matching query", () => {
-      const results = testStore.searchFTS("xyznonexistent", 10);
+    test("returns empty for non-matching query", async () => {
+      const results = await testStore.searchFTS("xyznonexistent", 10);
       expect(results.length).toBe(0);
     });
 
-    test("respects limit parameter", () => {
-      const results = testStore.searchFTS("meeting", 1);
+    test("respects limit parameter", async () => {
+      const results = await testStore.searchFTS("meeting", 1);
       expect(results.length).toBe(1);
     });
 
     // Note: Collection filtering tests removed - collections are now managed in YAML, not DB
 
-    test("formats results as structured content", () => {
-      const results = testStore.searchFTS("api", 10);
-      const filtered = results.map(r => ({
+    test("formats results as structured content", async () => {
+      const results = await testStore.searchFTS("api", 10);
+      const filtered = await Promise.all(results.map(async r => ({
         file: r.displayPath,
         title: r.title,
         score: Math.round(r.score * 100) / 100,
-        context: testStore.getContextForFile(r.filepath),
+        context: await testStore.getContextForFile(r.filepath),
         snippet: extractSnippet(r.body || "", "api", 300, r.chunkPos).snippet,
-      }));
+      })));
       // MCP now returns structuredContent with results array
       expect(filtered.length).toBeGreaterThan(0);
       expect(filtered[0]).toHaveProperty("file");
@@ -302,8 +305,8 @@ describe("MCP Server", () => {
 
     test("returns empty when no vector table exists", async () => {
       const emptyStore = createStore(":memory:");
-      initTestDatabase(emptyStore.db);
-      emptyStore.db.exec("DROP TABLE IF EXISTS vectors_vec");
+      await initTestDatabase(emptyStore.db);
+      await emptyStore.db.exec("DROP TABLE IF EXISTS vectors_vec");
 
       const results = await emptyStore.searchVec(() => getQueryEmbedding("test", DEFAULT_EMBED_MODEL), 10);
       expect(results.length).toBe(0);
@@ -357,7 +360,7 @@ describe("MCP Server", () => {
 
       const rankedLists: RankedResult[][] = [];
       for (const q of queries) {
-        const ftsResults = testStore.searchFTS(q, 20);
+        const ftsResults = await testStore.searchFTS(q, 20);
         if (ftsResults.length > 0) {
           rankedLists.push(ftsResults.map(r => ({
             file: r.filepath,
@@ -390,72 +393,72 @@ describe("MCP Server", () => {
   // ===========================================================================
 
   describe("qmd_get tool", () => {
-    test("retrieves document by display_path", () => {
-      const meta = testStore.findDocument("readme.md", { includeBody: false });
+    test("retrieves document by display_path", async () => {
+      const meta = await testStore.findDocument("readme.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody(meta) ?? "";
+      const body = await testStore.getDocumentBody(meta) ?? "";
 
       expect(meta.displayPath).toBe("docs/readme.md");
       expect(body).toContain("Project README");
     });
 
-    test("retrieves document by filepath", () => {
-      const meta = testStore.findDocument("/test/docs/api.md", { includeBody: false });
+    test("retrieves document by filepath", async () => {
+      const meta = await testStore.findDocument("/test/docs/api.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
       expect(meta.title).toBe("API Documentation");
     });
 
-    test("retrieves document by partial path", () => {
-      const result = testStore.findDocument("api.md", { includeBody: false });
+    test("retrieves document by partial path", async () => {
+      const result = await testStore.findDocument("api.md", { includeBody: false });
       expect("error" in result).toBe(false);
     });
 
-    test("returns not found for missing document", () => {
-      const result = testStore.findDocument("nonexistent.md", { includeBody: false });
+    test("returns not found for missing document", async () => {
+      const result = await testStore.findDocument("nonexistent.md", { includeBody: false });
       expect("error" in result).toBe(true);
       if ("error" in result) {
         expect(result.error).toBe("not_found");
       }
     });
 
-    test("suggests similar files when not found", () => {
-      const result = testStore.findDocument("readm.md", { includeBody: false }); // typo
+    test("suggests similar files when not found", async () => {
+      const result = await testStore.findDocument("readm.md", { includeBody: false }); // typo
       expect("error" in result).toBe(true);
       if ("error" in result) {
         expect(result.similarFiles.length).toBeGreaterThanOrEqual(0);
       }
     });
 
-    test("supports line range with :line suffix", () => {
-      const meta = testStore.findDocument("readme.md:2", { includeBody: false });
+    test("supports line range with :line suffix", async () => {
+      const meta = await testStore.findDocument("readme.md:2", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody(meta, 2, 2) ?? "";
+      const body = await testStore.getDocumentBody(meta, 2, 2) ?? "";
       const lines = body.split("\n");
       expect(lines.length).toBeLessThanOrEqual(2);
     });
 
-    test("supports fromLine parameter", () => {
-      const meta = testStore.findDocument("readme.md", { includeBody: false });
+    test("supports fromLine parameter", async () => {
+      const meta = await testStore.findDocument("readme.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody(meta, 3) ?? "";
+      const body = await testStore.getDocumentBody(meta, 3) ?? "";
       expect(body).not.toContain("# Project README");
     });
 
-    test("supports maxLines parameter", () => {
-      const meta = testStore.findDocument("api.md", { includeBody: false });
+    test("supports maxLines parameter", async () => {
+      const meta = await testStore.findDocument("api.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody(meta, 1, 3) ?? "";
+      const body = await testStore.getDocumentBody(meta, 1, 3) ?? "";
       const lines = body.split("\n");
       expect(lines.length).toBeLessThanOrEqual(3);
     });
 
-    test("includes context for documents in context path", () => {
-      const result = testStore.findDocument("meetings/meeting-2024-01.md", { includeBody: false });
+    test("includes context for documents in context path", async () => {
+      const result = await testStore.findDocument("meetings/meeting-2024-01.md", { includeBody: false });
       expect("error" in result).toBe(false);
       if ("error" in result) return;
       expect(result.context).toBe("Meeting notes and transcripts");
@@ -467,8 +470,8 @@ describe("MCP Server", () => {
   // ===========================================================================
 
   describe("qmd_multi_get tool", () => {
-    test("retrieves multiple documents by glob pattern", () => {
-      const { docs, errors } = testStore.findDocuments("meetings/*.md", { includeBody: true });
+    test("retrieves multiple documents by glob pattern", async () => {
+      const { docs, errors } = await testStore.findDocuments("meetings/*.md", { includeBody: true });
       expect(errors.length).toBe(0);
       expect(docs.length).toBe(2);
       const paths = docs.map(d => d.doc.displayPath);
@@ -476,29 +479,29 @@ describe("MCP Server", () => {
       expect(paths).toContain("docs/meetings/meeting-2024-02.md");
     });
 
-    test("retrieves documents by comma-separated list", () => {
-      const { docs, errors } = testStore.findDocuments("readme.md, api.md", { includeBody: true });
+    test("retrieves documents by comma-separated list", async () => {
+      const { docs, errors } = await testStore.findDocuments("readme.md, api.md", { includeBody: true });
       expect(errors.length).toBe(0);
       expect(docs.length).toBe(2);
     });
 
-    test("returns errors for missing files in comma list", () => {
-      const { docs, errors } = testStore.findDocuments("readme.md, nonexistent.md", { includeBody: true });
+    test("returns errors for missing files in comma list", async () => {
+      const { docs, errors } = await testStore.findDocuments("readme.md, nonexistent.md", { includeBody: true });
       expect(docs.length).toBe(1);
       expect(errors.length).toBe(1);
       expect(errors[0]).toContain("not found");
     });
 
-    test("skips files larger than maxBytes", () => {
-      const { docs } = testStore.findDocuments("*.md", { includeBody: true, maxBytes: 1000 }); // 1KB limit
+    test("skips files larger than maxBytes", async () => {
+      const { docs } = await testStore.findDocuments("*.md", { includeBody: true, maxBytes: 1000 }); // 1KB limit
       const large = docs.find(d => d.doc.displayPath === "docs/large-file.md");
       expect(large).toBeDefined();
       expect(large?.skipped).toBe(true);
       if (large?.skipped) expect(large.skipReason).toContain("too large");
     });
 
-    test("respects maxLines parameter", () => {
-      const { docs } = testStore.findDocuments("readme.md", { includeBody: true, maxBytes: DEFAULT_MULTI_GET_MAX_BYTES });
+    test("respects maxLines parameter", async () => {
+      const { docs } = await testStore.findDocuments("readme.md", { includeBody: true, maxBytes: DEFAULT_MULTI_GET_MAX_BYTES });
       expect(docs.length).toBe(1);
       const d = docs[0]!;
       expect(d.skipped).toBe(false);
@@ -510,15 +513,15 @@ describe("MCP Server", () => {
       expect(lines.length).toBeLessThanOrEqual(2);
     });
 
-    test("returns error for non-matching glob", () => {
-      const { docs, errors } = testStore.findDocuments("nonexistent/*.md", { includeBody: true });
+    test("returns error for non-matching glob", async () => {
+      const { docs, errors } = await testStore.findDocuments("nonexistent/*.md", { includeBody: true });
       expect(docs.length).toBe(0);
       expect(errors.length).toBe(1);
       expect(errors[0]).toContain("No files matched");
     });
 
-    test("includes context in results", () => {
-      const { docs } = testStore.findDocuments("meetings/meeting-2024-01.md", { includeBody: true });
+    test("includes context in results", async () => {
+      const { docs } = await testStore.findDocuments("meetings/meeting-2024-01.md", { includeBody: true });
       expect(docs.length).toBe(1);
       const d = docs[0]!;
       expect(d.skipped).toBe(false);
@@ -535,16 +538,16 @@ describe("MCP Server", () => {
   // ===========================================================================
 
   describe("qmd_status tool", () => {
-    test("returns index status", () => {
-      const status = testStore.getStatus();
+    test("returns index status", async () => {
+      const status = await testStore.getStatus();
       expect(status.totalDocuments).toBe(5);
       expect(status.hasVectorIndex).toBe(true);
       expect(status.collections.length).toBe(1);
       expect(status.collections[0]!.path).toBe("/test/docs");
     });
 
-    test("shows documents needing embedding", () => {
-      const status = testStore.getStatus();
+    test("shows documents needing embedding", async () => {
+      const status = await testStore.getStatus();
       // large-file.md doesn't have embeddings
       expect(status.needsEmbedding).toBe(1);
     });
@@ -555,94 +558,94 @@ describe("MCP Server", () => {
   // ===========================================================================
 
   describe("qmd:// resource", () => {
-    test("lists all documents", () => {
-      const docs = testDb.prepare(`
+    test("lists all documents", async () => {
+      const docs = await testDb.all(`
         SELECT path as display_path, title
         FROM documents
         WHERE active = 1
         ORDER BY modified_at DESC
         LIMIT 1000
-      `).all() as { display_path: string; title: string }[];
+      `) as { display_path: string; title: string }[];
 
       expect(docs.length).toBe(5);
       expect(docs.map(d => d.display_path)).toContain("readme.md");
     });
 
-    test("reads document by display_path", () => {
+    test("reads document by display_path", async () => {
       const path = "readme.md";
-      const doc = testDb.prepare(`
+      const doc = await testDb.get(`
         SELECT 'qmd://' || d.collection || '/' || d.path as filepath, d.path as display_path, content.doc as body
         FROM documents d
         JOIN content ON content.hash = d.hash
         WHERE d.path = ? AND d.active = 1
-      `).get(path) as { filepath: string; display_path: string; body: string } | null;
+      `, path) as { filepath: string; display_path: string; body: string } | null;
 
       expect(doc).not.toBeNull();
       expect(doc?.body).toContain("Project README");
     });
 
-    test("reads document by URL-encoded path", () => {
+    test("reads document by URL-encoded path", async () => {
       // Simulate URL encoding that MCP clients may send
       const encodedPath = "meetings%2Fmeeting-2024-01.md";
       const decodedPath = decodeURIComponent(encodedPath);
 
-      const doc = testDb.prepare(`
+      const doc = await testDb.get(`
         SELECT 'qmd://' || d.collection || '/' || d.path as filepath, d.path as display_path, content.doc as body
         FROM documents d
         JOIN content ON content.hash = d.hash
         WHERE d.path = ? AND d.active = 1
-      `).get(decodedPath) as { filepath: string; display_path: string; body: string } | null;
+      `, decodedPath) as { filepath: string; display_path: string; body: string } | null;
 
       expect(doc).not.toBeNull();
       expect(doc?.display_path).toBe("meetings/meeting-2024-01.md");
     });
 
-    test("reads document by suffix match", () => {
+    test("reads document by suffix match", async () => {
       const path = "meeting-2024-01.md"; // without meetings/ prefix
-      let doc = testDb.prepare(`
+      let doc = await testDb.get(`
         SELECT 'qmd://' || d.collection || '/' || d.path as filepath, d.path as display_path, content.doc as body
         FROM documents d
         JOIN content ON content.hash = d.hash
         WHERE d.path = ? AND d.active = 1
-      `).get(path) as { filepath: string; display_path: string; body: string } | null;
+      `, path) as { filepath: string; display_path: string; body: string } | null;
 
       if (!doc) {
-        doc = testDb.prepare(`
+        doc = await testDb.get(`
           SELECT 'qmd://' || d.collection || '/' || d.path as filepath, d.path as display_path, content.doc as body
           FROM documents d
           JOIN content ON content.hash = d.hash
           WHERE d.path LIKE ? AND d.active = 1
           LIMIT 1
-        `).get(`%${path}`) as { filepath: string; display_path: string; body: string } | null;
+        `, `%${path}`) as { filepath: string; display_path: string; body: string } | null;
       }
 
       expect(doc).not.toBeNull();
       expect(doc?.display_path).toBe("meetings/meeting-2024-01.md");
     });
 
-    test("returns not found for missing document", () => {
+    test("returns not found for missing document", async () => {
       const path = "nonexistent.md";
-      const doc = testDb.prepare(`
+      const doc = await testDb.get(`
         SELECT 'qmd://' || d.collection || '/' || d.path as filepath, d.path as display_path, content.doc as body
         FROM documents d
         JOIN content ON content.hash = d.hash
         WHERE d.path = ? AND d.active = 1
-      `).get(path) as { filepath: string; display_path: string; body: string } | null;
+      `, path) as { filepath: string; display_path: string; body: string } | null;
 
       expect(doc).toBeNull();
     });
 
-    test("includes context in document body", () => {
+    test("includes context in document body", async () => {
       const path = "meetings/meeting-2024-01.md";
-      const doc = testDb.prepare(`
+      const doc = await testDb.get(`
         SELECT 'qmd://' || d.collection || '/' || d.path as filepath, d.path as display_path, content.doc as body
         FROM documents d
         JOIN content ON content.hash = d.hash
         WHERE d.path = ? AND d.active = 1
-      `).get(path) as { filepath: string; display_path: string; body: string } | null;
+      `, path) as { filepath: string; display_path: string; body: string } | null;
 
       expect(doc).not.toBeNull();
-      const context = testStore.getContextForFile(doc!.filepath);
+      const context = await testStore.getContextForFile(doc!.filepath);
       expect(context).toBe("Meeting notes and transcripts");
 
       // Verify context would be prepended
@@ -676,7 +679,7 @@ describe("MCP Server", () => {
       expect(fullyDecoded).toBe("meetings/meeting-2024-01.md");
     });
 
-    test("handles URL-encoded paths with spaces", () => {
+    test("handles URL-encoded paths with spaces", async () => {
       // Add a document with spaces in the path
       const now = new Date().toISOString();
       const body = "# Podcast Episode\n\nInterview content here.";
@@ -684,16 +687,16 @@ describe("MCP Server", () => {
       const path = "External Podcast/2023 April - Interview.md";
 
       // Insert content first
-      testDb.prepare(`
+      await testDb.exec(`
         INSERT OR IGNORE INTO content (hash, doc, created_at)
         VALUES (?, ?, ?)
-      `).run(hash, body, now);
+      `, hash, body, now);
 
       // Then insert document metadata
-      testDb.prepare(`
+      await testDb.exec(`
         INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
         VALUES ('docs', ?, ?, ?, ?, ?, 1)
-      `).run(path, "Podcast Episode", hash, now, now);
+      `, path, "Podcast Episode", hash, now, now);
 
       // Simulate URL-encoded path from MCP client
       const encodedPath = "External%20Podcast%2F2023%20April%20-%20Interview.md";
@@ -701,12 +704,12 @@ describe("MCP Server", () => {
 
       expect(decodedPath).toBe("External Podcast/2023 April - Interview.md");
 
-      const doc = testDb.prepare(`
+      const doc = await testDb.get(`
         SELECT 'qmd://' || d.collection || '/' || d.path as filepath, d.path as display_path, content.doc as body
         FROM documents d
         JOIN content ON content.hash = d.hash
         WHERE d.path = ? AND d.active = 1
-      `).get(decodedPath) as { filepath: string; display_path: string; body: string } | null;
+      `, decodedPath) as { filepath: string; display_path: string; body: string } | null;
 
       expect(doc).not.toBeNull();
       expect(doc?.display_path).toBe("External Podcast/2023 April - Interview.md");
@@ -760,30 +763,30 @@ QMD is your on-device search engine for markdown knowledge bases.`;
   // ===========================================================================
 
   describe("edge cases", () => {
-    test("handles empty query", () => {
-      const results = testStore.searchFTS("", 10);
+    test("handles empty query", async () => {
+      const results = await testStore.searchFTS("", 10);
       expect(results.length).toBe(0);
     });
 
-    test("handles special characters in query", () => {
-      const results = testStore.searchFTS("project's", 10);
+    test("handles special characters in query", async () => {
+      const results = await testStore.searchFTS("project's", 10);
       // Should not throw
       expect(Array.isArray(results)).toBe(true);
     });
 
-    test("handles unicode in query", () => {
-      const results = testStore.searchFTS("文档", 10);
+    test("handles unicode in query", async () => {
+      const results = await testStore.searchFTS("文档", 10);
       expect(Array.isArray(results)).toBe(true);
     });
 
-    test("handles very long query", () => {
+    test("handles very long query", async () => {
       const longQuery = "documentation ".repeat(100);
-      const results = testStore.searchFTS(longQuery, 10);
+      const results = await testStore.searchFTS(longQuery, 10);
       expect(Array.isArray(results)).toBe(true);
     });
 
-    test("handles query with only stopwords", () => {
-      const results = testStore.searchFTS("the and or", 10);
+    test("handles query with only stopwords", async () => {
+      const results = await testStore.searchFTS("the and or", 10);
       expect(Array.isArray(results)).toBe(true);
     });
 
@@ -816,15 +819,15 @@ QMD is your on-device search engine for markdown knowledge bases.`;
       expect(segments).toContain("%20"); // Spaces encoded
     });
 
-    test("search results have correct structure for structuredContent", () => {
-      const results = testStore.searchFTS("readme", 5);
-      const structured = results.map(r => ({
+    test("search results have correct structure for structuredContent", async () => {
+      const results = await testStore.searchFTS("readme", 5);
+      const structured = await Promise.all(results.map(async r => ({
         file: r.displayPath,
         title: r.title,
         score: Math.round(r.score * 100) / 100,
-        context: testStore.getContextForFile(r.filepath),
+        context: await testStore.getContextForFile(r.filepath),
         snippet: extractSnippet(r.body || "", "readme", 300, r.chunkPos).snippet,
-      }));
+      })));
 
       expect(structured.length).toBeGreaterThan(0);
       const item = structured[0]!;
@@ -846,12 +849,12 @@ QMD is your on-device search engine for markdown knowledge bases.`;
       expect(errorResponse.content[0]!.type).toBe("text");
     });
 
-    test("embedded resources include name and title", () => {
+    test("embedded resources include name and title", async () => {
       // Simulate what qmd_get returns
-      const meta = testStore.findDocument("readme.md", { includeBody: false });
+      const meta = await testStore.findDocument("readme.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
-      const body = testStore.getDocumentBody(meta) ?? "";
+      const body = await testStore.getDocumentBody(meta) ?? "";
       const resource = {
         uri: `qmd://${meta.displayPath}`,
         name: meta.displayPath,
@@ -864,8 +867,8 @@ QMD is your on-device search engine for markdown knowledge bases.`;
       expect(resource.mimeType).toBe("text/markdown");
     });
 
-    test("status response includes structuredContent", () => {
-      const status = testStore.getStatus();
+    test("status response includes structuredContent", async () => {
+      const status = await testStore.getStatus();
       // Verify structure matches StatusResult type
       expect(typeof status.totalDocuments).toBe("number");
       expect(typeof status.needsEmbedding).toBe("number");
