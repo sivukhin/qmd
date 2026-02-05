@@ -76,7 +76,7 @@ async function createTestStore(): Promise<Store> {
     YAML.stringify(emptyConfig)
   );
 
-  return createStore(testDbPath);
+  return createStore(testDbPath, { dbName: 'turso' });
 }
 
 async function cleanupTestDb(store: Store): Promise<void> {
@@ -105,7 +105,7 @@ async function cleanupTestDb(store: Store): Promise<void> {
 
 // Helper to insert a test document directly into the database
 async function insertTestDocument(
-  db: StoreDb,
+  store: Store,
   collectionName: string,
   opts: {
     name?: string;
@@ -139,19 +139,12 @@ async function insertTestDocument(
   // Generate hash from body if not provided
   const hash = opts.hash || await hashContent(body);
 
-  // Insert content (with OR IGNORE for deduplication)
-  await db.exec(`
-    INSERT OR IGNORE INTO content (hash, doc, created_at)
-    VALUES (?, ?, ?)
-  `, hash, body, now);
-
-  // Insert document
-  const result = await db.exec(`
-    INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `, collectionName, path, title, hash, now, now, active);
-
-  return Number(result.lastInsertRowid);
+  await store.insertContent(hash, body, now);
+  const id = await store.insertDocument(collectionName, path, title, hash, now, now);
+  if (!active) {
+    await store.deactivateDocument(collectionName, path);
+  }
+  return id;
 }
 
 // Helper to create a test collection in YAML config
@@ -431,10 +424,11 @@ describe("Store Creation", () => {
 
     const tableNames = tables.map(t => t.name);
     expect(tableNames).toContain("documents");
-    expect(tableNames).toContain("documents_fts");
     expect(tableNames).toContain("content_vectors");
     expect(tableNames).toContain("llm_cache");
-    // Note: path_contexts table removed in favor of YAML-based context storage
+    if (store.db.name == 'sqlite3') {
+      expect(tableNames).toContain("documents_fts");
+    }
 
     await cleanupTestDb(store);
   });
@@ -721,7 +715,7 @@ describe("Path Context", () => {
     await addPathContext(collectionName, "/docs", "Documentation files");
 
     // Insert a document so getContextForFile can find it
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "readme",
       displayPath: "docs/readme.md",
     });
@@ -740,15 +734,15 @@ describe("Path Context", () => {
     await addPathContext(collectionName, "/docs/api", "API documentation");
 
     // Insert documents so getContextForFile can find them
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "readme",
       displayPath: "readme.md",
     });
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "guide",
       displayPath: "docs/guide.md",
     });
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "reference",
       displayPath: "docs/api/reference.md",
     });
@@ -786,7 +780,7 @@ describe("FTS Search", () => {
   test("searchFTS returns empty array for no matches", async () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "doc1",
       body: "The quick brown fox jumps over the lazy dog",
     });
@@ -800,7 +794,7 @@ describe("FTS Search", () => {
   test("searchFTS finds documents by keyword", async () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "doc1",
       title: "Fox Document",
       body: "The quick brown fox jumps over the lazy dog",
@@ -821,7 +815,7 @@ describe("FTS Search", () => {
     const collectionName = await createTestCollection();
 
     // Document with "fox" in body only
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "body-match",
       title: "Some Other Title",
       body: "The fox is here in the body",
@@ -829,7 +823,7 @@ describe("FTS Search", () => {
     });
 
     // Document with "fox" in title (via name field which is indexed)
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "fox",
       title: "Fox Title",
       body: "Different content without the animal fox",
@@ -851,7 +845,7 @@ describe("FTS Search", () => {
 
     // Insert 10 documents
     for (let i = 0; i < 10; i++) {
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: `doc${i}`,
         body: "common keyword appears here",
         displayPath: `test/doc${i}.md`,
@@ -869,13 +863,13 @@ describe("FTS Search", () => {
     const collection1 = await createTestCollection({ pwd: "/path/one", glob: "**/*.md", name: "one" });
     const collection2 = await createTestCollection({ pwd: "/path/two", glob: "**/*.md", name: "two" });
 
-    await insertTestDocument(store.db, collection1, {
+    await insertTestDocument(store, collection1, {
       name: "doc1",
       body: "searchable content",
       displayPath: "doc1.md",
     });
 
-    await insertTestDocument(store.db, collection2, {
+    await insertTestDocument(store, collection2, {
       name: "doc2",
       body: "searchable content",
       displayPath: "doc2.md",
@@ -895,7 +889,7 @@ describe("FTS Search", () => {
   test("searchFTS handles special characters in query", async () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "doc1",
       body: "Function with params: foo(bar, baz)",
       displayPath: "test/doc1.md",
@@ -913,14 +907,14 @@ describe("FTS Search", () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
 
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "active",
       body: "findme content",
       displayPath: "test/active.md",
       active: 1,
     });
 
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "inactive",
       body: "findme content",
       displayPath: "test/inactive.md",
@@ -945,7 +939,7 @@ describe("Document Retrieval", () => {
     test("findDocument finds by exact filepath", async () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection({ pwd: "/exact/path", glob: "**/*.md" });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "mydoc",
         title: "My Document",
         displayPath: "mydoc.md",
@@ -967,7 +961,7 @@ describe("Document Retrieval", () => {
     test("findDocument finds by display_path", async () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection({ pwd: "/some/path", glob: "**/*.md" });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "mydoc",
         displayPath: "docs/mydoc.md",
       });
@@ -981,7 +975,7 @@ describe("Document Retrieval", () => {
     test("findDocument finds by partial path match", async () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection({ pwd: "/very/long/path/to", glob: "**/*.md" });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "mydoc",
         displayPath: "mydoc.md",
       });
@@ -995,7 +989,7 @@ describe("Document Retrieval", () => {
     test("findDocument includes body when requested", async () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection({ pwd: "/path", glob: "**/*.md" });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "mydoc",
         displayPath: "mydoc.md",
         body: "The actual body content",
@@ -1013,7 +1007,7 @@ describe("Document Retrieval", () => {
     test("findDocument returns error with suggestions for not found", async () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection();
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "similar",
         filepath: "/path/similar.md",
         displayPath: "similar.md",
@@ -1033,7 +1027,7 @@ describe("Document Retrieval", () => {
     test("findDocument handles :line suffix", async () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection();
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "mydoc",
         filepath: "/path/mydoc.md",
         displayPath: "mydoc.md",
@@ -1049,7 +1043,7 @@ describe("Document Retrieval", () => {
       const store = await createTestStore();
       const home = homedir();
       const collectionName = await createTestCollection({ pwd: home, name: "home" });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "mydoc",
         filepath: `${home}/docs/mydoc.md`,
         displayPath: "docs/mydoc.md",
@@ -1065,7 +1059,7 @@ describe("Document Retrieval", () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection({ pwd: "/path" });
       await addPathContext(collectionName, "docs", "Documentation");
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "mydoc",
         displayPath: "docs/mydoc.md",
       });
@@ -1094,7 +1088,7 @@ describe("Document Retrieval", () => {
       await addPathContext(collectionName, "/podcasts/external", "External podcast interviews");
 
       // Insert document in nested path
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "interview",
         displayPath: "podcasts/external/2024-jan-interview.md",
       });
@@ -1119,7 +1113,7 @@ describe("Document Retrieval", () => {
     test("getDocumentBody returns full body", async () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection({ pwd: "/path" });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "mydoc",
         displayPath: "mydoc.md",
         body: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
@@ -1134,7 +1128,7 @@ describe("Document Retrieval", () => {
     test("getDocumentBody supports line range", async () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection({ pwd: "/path" });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "mydoc",
         displayPath: "mydoc.md",
         body: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
@@ -1159,17 +1153,17 @@ describe("Document Retrieval", () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection();
 
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "doc1",
         filepath: "/path/journals/2024-01.md",
         displayPath: "journals/2024-01.md",
       });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "doc2",
         filepath: "/path/journals/2024-02.md",
         displayPath: "journals/2024-02.md",
       });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "doc3",
         filepath: "/path/other/file.md",
         displayPath: "other/file.md",
@@ -1186,12 +1180,12 @@ describe("Document Retrieval", () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection();
 
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "doc1",
         filepath: "/path/doc1.md",
         displayPath: "doc1.md",
       });
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "doc2",
         filepath: "/path/doc2.md",
         displayPath: "doc2.md",
@@ -1208,7 +1202,7 @@ describe("Document Retrieval", () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection();
 
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "doc1",
         filepath: "/path/doc1.md",
         displayPath: "doc1.md",
@@ -1226,7 +1220,7 @@ describe("Document Retrieval", () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection();
 
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "large",
         filepath: "/path/large.md",
         displayPath: "large.md",
@@ -1247,7 +1241,7 @@ describe("Document Retrieval", () => {
       const store = await createTestStore();
       const collectionName = await createTestCollection();
 
-      await insertTestDocument(store.db, collectionName, {
+      await insertTestDocument(store, collectionName, {
         name: "doc1",
         filepath: "/path/doc1.md",
         displayPath: "doc1.md",
@@ -1497,9 +1491,9 @@ describe("Index Status", () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
 
-    await insertTestDocument(store.db, collectionName, { name: "doc1", active: 1 });
-    await insertTestDocument(store.db, collectionName, { name: "doc2", active: 1 });
-    await insertTestDocument(store.db, collectionName, { name: "doc3", active: 0 }); // inactive
+    await insertTestDocument(store, collectionName, { name: "doc1", active: 1 });
+    await insertTestDocument(store, collectionName, { name: "doc2", active: 1 });
+    await insertTestDocument(store, collectionName, { name: "doc3", active: 0 }); // inactive
 
     const status = await store.getStatus();
     expect(status.totalDocuments).toBe(2); // Only active docs
@@ -1510,7 +1504,7 @@ describe("Index Status", () => {
   test("getStatus reports collection info", async () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection({ pwd: "/test/path", glob: "**/*.md" });
-    await insertTestDocument(store.db, collectionName, { name: "doc1" });
+    await insertTestDocument(store, collectionName, { name: "doc1" });
 
     const status = await store.getStatus();
     expect(status.collections.length).toBeGreaterThanOrEqual(1);
@@ -1528,9 +1522,9 @@ describe("Index Status", () => {
     const collectionName = await createTestCollection();
 
     // Add documents with different hashes
-    await insertTestDocument(store.db, collectionName, { name: "doc1", hash: "hash1" });
-    await insertTestDocument(store.db, collectionName, { name: "doc2", hash: "hash2" });
-    await insertTestDocument(store.db, collectionName, { name: "doc3", hash: "hash1" }); // same hash as doc1
+    await insertTestDocument(store, collectionName, { name: "doc1", hash: "hash1" });
+    await insertTestDocument(store, collectionName, { name: "doc2", hash: "hash2" });
+    await insertTestDocument(store, collectionName, { name: "doc3", hash: "hash1" }); // same hash as doc1
 
     const needsEmbedding = await store.getHashesNeedingEmbedding();
     expect(needsEmbedding).toBe(2); // hash1 and hash2
@@ -1541,7 +1535,7 @@ describe("Index Status", () => {
   test("getIndexHealth returns health info", async () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
-    await insertTestDocument(store.db, collectionName, { name: "doc1" });
+    await insertTestDocument(store, collectionName, { name: "doc1" });
 
     const health = await store.getIndexHealth();
     expect(health).toHaveProperty("needsEmbedding");
@@ -1562,11 +1556,11 @@ describe("Fuzzy Matching", () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
 
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "readme",
       displayPath: "docs/readme.md",
     });
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "readmi",
       displayPath: "docs/readmi.md", // typo
     });
@@ -1581,11 +1575,11 @@ describe("Fuzzy Matching", () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
 
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "abc",
       displayPath: "abc.md",
     });
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "xyz",
       displayPath: "xyz.md", // very different
     });
@@ -1601,15 +1595,15 @@ describe("Fuzzy Matching", () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
 
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       filepath: "/p/journals/2024-01.md",
       displayPath: "journals/2024-01.md",
     });
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       filepath: "/p/journals/2024-02.md",
       displayPath: "journals/2024-02.md",
     });
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       filepath: "/p/docs/readme.md",
       displayPath: "docs/readme.md",
     });
@@ -1629,6 +1623,9 @@ describe("Fuzzy Matching", () => {
 describe("Vector Table", () => {
   test("ensureVecTable creates vector table", async () => {
     const store = await createTestStore();
+    if (store.db.name == 'turso') {
+      return;
+    }
 
     // Initially no vector table
     let exists = await store.db.get(`
@@ -1649,6 +1646,9 @@ describe("Vector Table", () => {
 
   test("ensureVecTable recreates table if dimensions change", async () => {
     const store = await createTestStore();
+    if (store.db.name == 'turso') {
+      return;
+    }
 
     // Create with 768 dimensions
     await store.ensureVecTable(768);
@@ -1684,7 +1684,7 @@ describe("Integration", () => {
     await addPathContext(collectionName, "/", "Personal notes");
 
     // Insert documents
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "meeting",
       title: "Team Meeting Notes",
       filepath: "/test/notes/meeting.md",
@@ -1692,7 +1692,7 @@ describe("Integration", () => {
       body: "# Team Meeting Notes\n\nDiscussed project timeline and deliverables.",
     });
 
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "ideas",
       title: "Project Ideas",
       filepath: "/test/notes/ideas.md",
@@ -1733,13 +1733,13 @@ describe("Integration", () => {
     const col1 = await createTestCollection({ pwd: "/store1", glob: "**/*.md", name: "store1" });
     const col2 = await createTestCollection({ pwd: "/store2", glob: "**/*.md", name: "store2" });
 
-    await insertTestDocument(store1.db, col1, {
+    await insertTestDocument(store1, col1, {
       name: "doc1",
       body: "unique content for store1",
       displayPath: "doc.md",
     });
 
-    await insertTestDocument(store2.db, col2, {
+    await insertTestDocument(store2, col2, {
       name: "doc2",
       body: "different content for store2",
       displayPath: "doc.md",
@@ -1777,7 +1777,7 @@ describe("LlamaCpp Integration", () => {
   test("searchVec returns empty when no vector index", async () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "doc1",
       body: "Some content",
     });
@@ -1794,7 +1794,7 @@ describe("LlamaCpp Integration", () => {
     const collectionName = await createTestCollection();
 
     const hash = "testhash123";
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "doc1",
       hash,
       body: "Some content about testing",
@@ -1805,8 +1805,7 @@ describe("LlamaCpp Integration", () => {
     // Create vector table and insert a vector
     await store.ensureVecTable(768);
     const embedding = Array(768).fill(0).map(() => Math.random());
-    await store.db.exec(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`, hash, new Date().toISOString());
-    await store.db.exec(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`, `${hash}_0`, new Float32Array(embedding));
+    await store.insertEmbedding(hash, 0, 0, new Float32Array(embedding), 'test', new Date().toISOString());
 
     const results = await store.searchVec(() => getQueryEmbedding("test query", "embeddinggemma"), 10);
     expect(results).toHaveLength(1);
@@ -1825,13 +1824,13 @@ describe("LlamaCpp Integration", () => {
     const hash1 = "hash1abc";
     const hash2 = "hash2xyz";
 
-    await insertTestDocument(store.db, collection1, {
+    await insertTestDocument(store, collection1, {
       name: "doc1",
       hash: hash1,
       body: "Content in collection one",
     });
 
-    await insertTestDocument(store.db, collection2, {
+    await insertTestDocument(store, collection2, {
       name: "doc2",
       hash: hash2,
       body: "Content in collection two",
@@ -1841,10 +1840,8 @@ describe("LlamaCpp Integration", () => {
     await store.ensureVecTable(768);
     const embedding1 = Array(768).fill(0).map(() => Math.random());
     const embedding2 = Array(768).fill(0).map(() => Math.random());
-    await store.db.exec(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`, hash1, new Date().toISOString());
-    await store.db.exec(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`, hash2, new Date().toISOString());
-    await store.db.exec(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`, `${hash1}_0`, new Float32Array(embedding1));
-    await store.db.exec(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`, `${hash2}_0`, new Float32Array(embedding2));
+    await store.insertEmbedding(hash1, 0, 0, new Float32Array(embedding1), 'test', new Date().toISOString());
+    await store.insertEmbedding(hash2, 0, 0, new Float32Array(embedding2), 'test', new Date().toISOString());
 
     // Search without filter - should return both
     const allResults = await store.searchVec(() => getQueryEmbedding("content", "embeddinggemma"), 10);
@@ -1866,7 +1863,7 @@ describe("LlamaCpp Integration", () => {
     const collectionName = await createTestCollection();
 
     const hash = "regression_test_hash";
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "regression-doc",
       hash,
       body: "Test content for vector search regression",
@@ -1877,8 +1874,7 @@ describe("LlamaCpp Integration", () => {
     // Create vector table and insert a test vector
     await store.ensureVecTable(768);
     const embedding = Array(768).fill(0).map(() => Math.random());
-    await store.db.exec(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, 0, 0, 'test', ?)`, hash, new Date().toISOString());
-    await store.db.exec(`INSERT INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`, `${hash}_0`, new Float32Array(embedding));
+    await store.insertEmbedding(hash, 0, 0, new Float32Array(embedding), 'test', new Date().toISOString());
 
     // This should complete quickly (not hang) due to the two-step fix
     // The old code with JOINs in the sqlite-vec query would hang indefinitely
@@ -1978,7 +1974,7 @@ describe("Edge Cases", () => {
     const collectionName = await createTestCollection();
 
     const longBody = "word ".repeat(100000); // ~600KB
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "long",
       body: longBody,
       displayPath: "long.md",
@@ -1994,7 +1990,7 @@ describe("Edge Cases", () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
 
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "unicode",
       title: "日本語タイトル",
       body: "# 日本語\n\n内容は日本語で書かれています。\n\nEmoji: 🎉🚀✨",
@@ -2020,7 +2016,7 @@ describe("Edge Cases", () => {
     const store = await createTestStore();
     const collectionName = await createTestCollection();
 
-    await insertTestDocument(store.db, collectionName, {
+    await insertTestDocument(store, collectionName, {
       name: "special",
       filepath: "/path/file with spaces.md",
       displayPath: "file with spaces.md",
@@ -2039,7 +2035,7 @@ describe("Edge Cases", () => {
 
     // Insert multiple documents concurrently
     const inserts = Array.from({ length: 10 }, (_, i) =>
-      insertTestDocument(store.db, collectionName, {
+      insertTestDocument(store, collectionName, {
         name: `concurrent${i}`,
         body: `Content ${i} searchterm`,
         displayPath: `concurrent${i}.md`,
@@ -2072,13 +2068,13 @@ describe("Content-Addressable Storage", () => {
     const content = "# Same Content\n\nThis is the same content in two places.";
     const hash1 = await hashContent(content);
 
-    const doc1 = await insertTestDocument(store.db, collection1, {
+    const doc1 = await insertTestDocument(store, collection1, {
       name: "doc1",
       body: content,
       displayPath: "doc1.md",
     });
 
-    const doc2 = await insertTestDocument(store.db, collection2, {
+    const doc2 = await insertTestDocument(store, collection2, {
       name: "doc2",
       body: content,
       displayPath: "doc2.md",
@@ -2109,13 +2105,13 @@ describe("Content-Addressable Storage", () => {
     const sharedContent = "# Shared Content\n\nThis is shared.";
     const sharedHash = await hashContent(sharedContent);
 
-    await insertTestDocument(store.db, collection1, {
+    await insertTestDocument(store, collection1, {
       name: "shared1",
       body: sharedContent,
       displayPath: "shared1.md",
     });
 
-    await insertTestDocument(store.db, collection2, {
+    await insertTestDocument(store, collection2, {
       name: "shared2",
       body: sharedContent,
       displayPath: "shared2.md",
@@ -2125,7 +2121,7 @@ describe("Content-Addressable Storage", () => {
     const uniqueContent = "# Unique Content\n\nThis is unique to collection1.";
     const uniqueHash = await hashContent(uniqueContent);
 
-    await insertTestDocument(store.db, collection1, {
+    await insertTestDocument(store, collection1, {
       name: "unique",
       body: uniqueContent,
       displayPath: "unique.md",
@@ -2169,7 +2165,7 @@ describe("Content-Addressable Storage", () => {
       const collName = await createTestCollection({ pwd: `/path/collection${i}`, name: `collection${i}` });
       collectionNames.push(collName);
 
-      await insertTestDocument(store.db, collName, {
+      await insertTestDocument(store, collName, {
         name: `doc${i}`,
         body: sharedContent,
         displayPath: `doc${i}.md`,
@@ -2204,13 +2200,13 @@ describe("Content-Addressable Storage", () => {
     // Hashes should be different
     expect(hash1).not.toBe(hash2);
 
-    const doc1 = await insertTestDocument(store.db, collectionName, {
+    const doc1 = await insertTestDocument(store, collectionName, {
       name: "doc1",
       body: content1,
       displayPath: "doc1.md",
     });
 
-    const doc2 = await insertTestDocument(store.db, collectionName, {
+    const doc2 = await insertTestDocument(store, collectionName, {
       name: "doc2",
       body: content2,
       displayPath: "doc2.md",

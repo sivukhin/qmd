@@ -144,6 +144,10 @@ export type SnippetResult = {
 // Store Interface
 // =============================================================================
 
+export type StoreOptions = {
+  dbName: string
+}
+
 export type StoreDb = {
   name: 'sqlite3' | 'turso';
   db: any;
@@ -210,7 +214,7 @@ export type Store = {
 
   // Document indexing operations
   insertContent: (hash: string, content: string, createdAt: string) => Promise<void>;
-  insertDocument: (collectionName: string, path: string, title: string, hash: string, createdAt: string, modifiedAt: string) => Promise<void>;
+  insertDocument: (collectionName: string, path: string, title: string, hash: string, createdAt: string, modifiedAt: string) => Promise<number>;
   findActiveDocument: (collectionName: string, path: string) => Promise<{ id: number; hash: string; title: string } | null>;
   updateDocumentTitle: (documentId: number, title: string, modifiedAt: string) => Promise<void>;
   updateDocument: (documentId: number, title: string, hash: string, modifiedAt: string) => Promise<void>;

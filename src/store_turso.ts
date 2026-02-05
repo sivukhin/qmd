@@ -19,7 +19,7 @@
  * Note: All methods are async due to Turso's async API.
  */
 
-import type { connect } from "@tursodatabase/database";
+import { connect } from "@tursodatabase/database";
 import { Glob } from "bun";
 import {
   type Store,
@@ -160,15 +160,11 @@ async function initializeDatabase(db: TursoDatabase): Promise<void> {
     )
   `);
 
-  try {
-    await db.exec(`
+  await db.exec(`
       CREATE INDEX IF NOT EXISTS fts_documents ON documents_search
       USING fts (filepath, title, body)
       WITH (tokenizer = 'default', weights = 'title=2.0,filepath=1.5,body=1.0')
-    `);
-  } catch {
-    // FTS index might already exist or not supported in test environment
-  }
+  `);
 }
 
 // =============================================================================
@@ -333,11 +329,12 @@ async function insertDocument(
   hash: string,
   createdAt: string,
   modifiedAt: string
-): Promise<void> {
-  await db.prepare(`
+): Promise<number> {
+  const { id } = await db.prepare(`
     INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
     VALUES (?, ?, ?, ?, ?, ?, 1)
-  `).run(collectionName, path, title, hash, createdAt, modifiedAt);
+    RETURNING id
+  `).get(collectionName, path, title, hash, createdAt, modifiedAt);
 
   const doc = await db.prepare(`SELECT id FROM documents WHERE collection = ? AND path = ? AND active = 1`).get(collectionName, path) as { id: number } | undefined;
 
@@ -348,6 +345,7 @@ async function insertDocument(
       await db.prepare(`INSERT OR REPLACE INTO documents_search (doc_id, filepath, title, body) VALUES (?, ?, ?, ?)`).run(doc.id, filepath, title, content.doc);
     }
   }
+  return id;
 }
 
 async function findActiveDocument(db: TursoDatabase, collectionName: string, path: string): Promise<{ id: number; hash: string; title: string } | null> {
@@ -1118,7 +1116,21 @@ async function searchVec(db: TursoDatabase, generate: () => Promise<number[] | n
 // Full-Text Search (using Turso native FTS with fts_match/fts_score)
 // =============================================================================
 
+function escapeTantivySpecialChars(query: string): string {
+  const special: string[] = ['+', '-', '&', '|', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\\', '/'];
+  const escaped: string[] = [];
+  for (const c of query) {
+    if (special.includes(c)) {
+      escaped.push(`\\${c}`);
+    } else {
+      escaped.push(c);
+    }
+  }
+  return escaped.join('');
+}
+
 async function searchFts(db: TursoDatabase, query: string, limit: number = 20, collectionName?: string): Promise<SearchResult[]> {
+  const queryEscaped = escapeTantivySpecialChars(query);
   // Use Turso's native FTS with fts_match for filtering and fts_score for ranking
   let sql = `
       SELECT score,
@@ -1136,7 +1148,7 @@ async function searchFts(db: TursoDatabase, query: string, limit: number = 20, c
       JOIN documents d ON d.id = ds.doc_id AND d.active = 1
       JOIN content ON content.hash = d.hash
     `;
-  const params: (string | number)[] = [query, limit];
+  const params: (string | number)[] = [queryEscaped, limit];
 
   if (collectionName) {
     sql += ` AND d.collection = ?3`;
@@ -1167,6 +1179,38 @@ async function searchFts(db: TursoDatabase, query: string, limit: number = 20, c
 // =============================================================================
 // Store Factory
 // =============================================================================
+
+let _productionMode = false;
+
+export function enableProductionMode(): void {
+  _productionMode = true;
+}
+
+export function getDefaultDbPath(indexName: string = "index"): string {
+  // Always allow override via INDEX_PATH (for testing)
+  if (Bun.env.INDEX_PATH) {
+    return Bun.env.INDEX_PATH;
+  }
+
+  // In non-production mode (tests), require explicit path
+  if (!_productionMode) {
+    throw new Error(
+      "Database path not set. Tests must set INDEX_PATH env var or use createStore() with explicit path. " +
+      "This prevents tests from accidentally writing to the global index."
+    );
+  }
+
+  const cacheDir = Bun.env.XDG_CACHE_HOME || resolve(homedir(), ".cache");
+  const qmdCacheDir = resolve(cacheDir, "qmd");
+  try { Bun.spawnSync(["mkdir", "-p", qmdCacheDir]); } catch { }
+  return resolve(qmdCacheDir, `${indexName}.turso`);
+}
+
+export async function connectTursoDb(dbPath?: string): Promise<{ db: TursoDatabase, path: string }> {
+  const resolvedPath = dbPath || getDefaultDbPath();
+  const db = await connect(resolvedPath, { experimental: ["index_method"] });
+  return { db, path: resolvedPath };
+}
 
 export async function createTursoStore(db: TursoDatabase, dbPath: string = ":memory:"): Promise<Store> {
   await initializeDatabase(db);

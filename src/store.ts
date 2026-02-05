@@ -17,6 +17,10 @@
  *   - store.ts: This file - imports and re-exports all public APIs
  */
 
+import { connectTursoDb, createTursoStore } from "./store_turso";
+import { createSqliteStore } from "./store_sqlite";
+import type { Store, StoreOptions } from "./store_types";
+
 // =============================================================================
 // Re-export types
 // =============================================================================
@@ -101,7 +105,6 @@ export {
 export {
   enableProductionMode,
   getDefaultDbPath,
-  createStore,
 } from "./store_sqlite";
 
 // =============================================================================
@@ -118,3 +121,12 @@ export {
   createTursoStore,
   type TursoDatabase,
 } from "./store_turso";
+
+export async function createStore(dbPath?: string, options?: StoreOptions): Promise<Store> {
+  if (options?.dbName == 'turso') {
+    const { db, path } = await connectTursoDb(dbPath);
+    return createTursoStore(db, path);
+  } else {
+    return createSqliteStore(dbPath);
+  }
+}

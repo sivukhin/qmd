@@ -390,11 +390,13 @@ function insertDocument(
   hash: string,
   createdAt: string,
   modifiedAt: string
-): void {
-  db.prepare(`
+): number {
+  const { id } = db.prepare(`
     INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
     VALUES (?, ?, ?, ?, ?, ?, 1)
-  `).run(collectionName, path, title, hash, createdAt, modifiedAt);
+    RETURNING id
+  `).get(collectionName, path, title, hash, createdAt, modifiedAt) as { id: number };
+  return id;
 }
 
 function findActiveDocument(
@@ -1465,7 +1467,7 @@ function getStatus(db: Database): IndexStatus {
 // Store Factory
 // =============================================================================
 
-export function createStore(dbPath?: string): Store {
+export function createSqliteStore(dbPath?: string): Store {
   const resolvedPath = dbPath || getDefaultDbPath();
   const db = new Database(resolvedPath);
   initializeDatabase(db);

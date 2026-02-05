@@ -264,7 +264,7 @@ export function parseVirtualPath(virtualPath: string): VirtualPath | null {
 
   // Match: qmd://collection-name[/optional-path]
   // Allows: qmd://name, qmd://name/, qmd://name/path
-  const match = normalized.match(/^qmd:\/\/([^\/]+)\/?(.*)$/);
+  const match = normalized.match(/^qmd:\/\/([^/]+)\/?(.*)$/);
   if (!match?.[1]) return null;
   return {
     collectionName: match[1],

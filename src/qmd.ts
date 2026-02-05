@@ -64,12 +64,12 @@ enableProductionMode();
 // Store/DB lifecycle (no legacy singletons in store.ts)
 // =============================================================================
 
-let store: ReturnType<typeof createStore> | null = null;
+let store: Store | null = null;
 let storeDbPathOverride: string | undefined;
 
-function getStore(): ReturnType<typeof createStore> {
+async function getStore(): Promise<Store> {
   if (!store) {
-    store = createStore(storeDbPathOverride);
+    store = await createStore(storeDbPathOverride);
   }
   return store;
 }
@@ -92,7 +92,7 @@ function setIndexName(name: string | null): void {
 }
 
 async function ensureVecTable(dimensions: number): Promise<void> {
-  await getStore().ensureVecTable(dimensions);
+  await (await getStore()).ensureVecTable(dimensions);
 }
 
 // Terminal colors (respects NO_COLOR env)
@@ -241,7 +241,7 @@ function formatBytes(bytes: number): string {
 
 async function showStatus(): Promise<void> {
   const dbPath = getDbPath();
-  const store = getStore();
+  const store = await getStore();
 
   // Collections are defined in YAML; no duplicate cleanup needed.
   // Collections are defined in YAML; no duplicate cleanup needed.
@@ -339,7 +339,7 @@ async function showStatus(): Promise<void> {
 }
 
 async function updateCollections(): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
   // Collections are defined in YAML; no duplicate cleanup needed.
 
   // Clear Ollama cache on update
@@ -398,7 +398,7 @@ async function updateCollections(): Promise<void> {
   }
 
   // Check if any documents need embedding (show once at end)
-  const finalStore = getStore();
+  const finalStore = await getStore();
   const needsEmbedding = await finalStore.getHashesNeedingEmbedding();
   closeDb();
 
@@ -586,7 +586,7 @@ function contextRemove(pathArg: string): void {
 }
 
 async function contextCheck(): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
 
   // Get collections without any context
   const collectionsWithoutContext = await store.getCollectionsWithoutContext();
@@ -643,7 +643,7 @@ async function contextCheck(): Promise<void> {
 }
 
 async function getDocument(filename: string, fromLine?: number, maxLines?: number, lineNumbers?: boolean): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
 
   // Parse :linenum suffix from filename (e.g., "file.md:100")
   let inputPath = filename;
@@ -824,7 +824,7 @@ async function getDocument(filename: string, fromLine?: number, maxLines?: numbe
 
 // Multi-get: fetch multiple documents by glob pattern or comma-separated list
 async function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT_MULTI_GET_MAX_BYTES, format: OutputFormat = "cli"): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
 
   // Check if it's a comma-separated list or a glob pattern
   const isCommaSeparated = pattern.includes(',') && !pattern.includes('*') && !pattern.includes('?');
@@ -1058,7 +1058,7 @@ async function multiGet(pattern: string, maxLines?: number, maxBytes: number = D
 
 // List files in virtual file tree
 async function listFiles(pathArg?: string): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
 
   if (!pathArg) {
     // No argument - list all collections
@@ -1200,7 +1200,7 @@ function formatLsTime(date: Date): string {
 
 // Collection management commands
 async function collectionList(): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
   const collections = await store.listCollections();
 
   if (collections.length === 0) {
@@ -1272,7 +1272,7 @@ async function collectionRemove(name: string): Promise<void> {
     process.exit(1);
   }
 
-  const store = getStore();
+  const store = await getStore();
   const result = await store.removeCollection(name);
   closeDb();
 
@@ -1300,7 +1300,7 @@ async function collectionRename(oldName: string, newName: string): Promise<void>
     process.exit(1);
   }
 
-  const store = getStore();
+  const store = await getStore();
   await store.renameCollection(oldName, newName);
   closeDb();
 
@@ -1309,7 +1309,7 @@ async function collectionRename(oldName: string, newName: string): Promise<void>
 }
 
 async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, collectionName?: string, suppressEmbedNotice: boolean = false): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
   const resolvedPwd = pwd || getPwd();
   const now = new Date().toISOString();
   const excludeDirs = ["node_modules", ".git", ".cache", "vendor", "dist", "build"];
@@ -1444,7 +1444,7 @@ function renderProgressBar(percent: number, width: number = 30): string {
 }
 
 async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean = false): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
   const now = new Date().toISOString();
 
   // If force, clear all vectors
@@ -1871,7 +1871,7 @@ function outputResults(results: { file: string; displayPath: string; title: stri
 }
 
 async function search(query: string, opts: OutputOptions): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
 
   // Validate collection filter if specified
   let collectionName: string | undefined;
@@ -1915,7 +1915,7 @@ async function search(query: string, opts: OutputOptions): Promise<void> {
 }
 
 async function vectorSearch(query: string, opts: OutputOptions, model: string = DEFAULT_EMBED_MODEL): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
 
   // Validate collection filter if specified
   let collectionName: string | undefined;
@@ -2029,7 +2029,7 @@ async function expandQueryStructured(query: string, includeLexical: boolean = tr
 }
 
 async function querySearch(query: string, opts: OutputOptions, embedModel: string = DEFAULT_EMBED_MODEL, rerankModel: string = DEFAULT_RERANK_MODEL): Promise<void> {
-  const store = getStore();
+  const store = await getStore();
 
   // Validate collection filter if specified
   let collectionName: string | undefined;
@@ -2606,7 +2606,7 @@ if (import.meta.main) {
     }
 
     case "cleanup": {
-      const store = getStore();
+      const store = await getStore();
 
       // 1. Clear llm_cache
       const cacheCount = store.deleteLLMCache();

@@ -10,7 +10,8 @@ import { mkdtemp, writeFile, unlink, readdir, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
-import { createTursoStore, type TursoStore, type TursoDatabase } from "./store_turso";
+import { createTursoStore, type TursoDatabase } from "./store_turso";
+import { type Store } from "./store_types";
 import type { CollectionConfig } from "./collections";
 
 // =============================================================================
@@ -79,7 +80,7 @@ afterAll(async () => {
 
 describe("TursoStore", () => {
   let db: TursoDatabase;
-  let store: TursoStore;
+  let store: Store;
 
   beforeEach(async () => {
     await setupTestConfig();
@@ -209,7 +210,7 @@ describe("TursoStore", () => {
   describe("Embedding Operations", () => {
     test("insertEmbedding stores embedding", async () => {
       const now = new Date().toISOString();
-      await store.insertEmbedding("hash1", 0, 0, [0.1, 0.2, 0.3], "model", now);
+      await store.insertEmbedding("hash1", 0, 0, new Float32Array([0.1, 0.2, 0.3]), "model", now);
 
       const row = await db.prepare("SELECT * FROM content_vectors WHERE hash = ?").get("hash1") as any;
       expect(row.hash).toBe("hash1");
@@ -227,7 +228,7 @@ describe("TursoStore", () => {
       expect(hashes.map(h => h.hash)).toContain("hash1");
       expect(hashes.map(h => h.hash)).toContain("hash2");
 
-      await store.insertEmbedding("hash1", 0, 0, [0.1], "model", now);
+      await store.insertEmbedding("hash1", 0, 0, new Float32Array([0.1]), "model", now);
       const remaining = await store.getHashesForEmbedding();
       expect(remaining.map(h => h.hash)).not.toContain("hash1");
       expect(remaining.map(h => h.hash)).toContain("hash2");
@@ -235,8 +236,8 @@ describe("TursoStore", () => {
 
     test("clearAllEmbeddings removes all embeddings", async () => {
       const now = new Date().toISOString();
-      await store.insertEmbedding("hash1", 0, 0, [0.1], "model", now);
-      await store.insertEmbedding("hash2", 0, 0, [0.2], "model", now);
+      await store.insertEmbedding("hash1", 0, 0, new Float32Array([0.1]), "model", now);
+      await store.insertEmbedding("hash2", 0, 0, new Float32Array([0.2]), "model", now);
 
       await store.clearAllEmbeddings();
 
@@ -315,13 +316,13 @@ describe("TursoStore", () => {
       const hash = "vechash123";
       await store.insertContent(hash, "Vector content", now);
       await store.insertDocument("coll", "vec.md", "Vec Doc", hash, now, now);
-      await store.insertEmbedding(hash, 0, 0, [0.1, 0.2, 0.3, 0.4], "model", now);
+      await store.insertEmbedding(hash, 0, 0, new Float32Array([0.1, 0.2, 0.3, 0.4]), "model", now);
 
-      const results = await store.searchVec([0.1, 0.2, 0.3, 0.4], 10);
+      const results = await store.searchVec(() => Promise.resolve([0.1, 0.2, 0.3, 0.4]), 10);
 
       expect(results.length).toBeGreaterThan(0);
-      expect(results[0].hash).toBe(hash);
-      expect(results[0].source).toBe("vec");
+      expect(results[0]!.hash).toBe(hash);
+      expect(results[0]!.source).toBe("vec");
     });
 
     test("searchVec returns results ordered by similarity", async () => {
@@ -333,43 +334,43 @@ describe("TursoStore", () => {
       await store.insertDocument("coll", "far.md", "Far", "far", now, now);
 
       // Embedding very similar to query
-      await store.insertEmbedding("close", 0, 0, [0.9, 0.1, 0.0, 0.0], "model", now);
+      await store.insertEmbedding("close", 0, 0, new Float32Array([0.9, 0.1, 0.0, 0.0]), "model", now);
       // Embedding very different from query
-      await store.insertEmbedding("far", 0, 0, [0.0, 0.0, 0.9, 0.1], "model", now);
+      await store.insertEmbedding("far", 0, 0, new Float32Array([0.0, 0.0, 0.9, 0.1]), "model", now);
 
-      const results = await store.searchVec([1.0, 0.0, 0.0, 0.0], 10);
+      const results = await store.searchVec(() => Promise.resolve([1.0, 0.0, 0.0, 0.0]), 10);
 
-      expect(results[0].hash).toBe("close");
+      expect(results[0]!.hash).toBe("close");
     });
   });
 
   describe("Full-Text Search", () => {
-    test("searchFts finds documents by content", async () => {
+    test("searchFTS finds documents by content", async () => {
       const now = new Date().toISOString();
       await store.insertContent("fts1", "Machine learning is transforming industries", now);
       await store.insertContent("fts2", "Database optimization techniques", now);
       await store.insertDocument("coll", "ml.md", "Machine Learning", "fts1", now, now);
       await store.insertDocument("coll", "db.md", "Database Guide", "fts2", now, now);
 
-      const results = await store.searchFts("machine learning", 10);
+      const results = await store.searchFTS("machine learning", 10);
 
       expect(results.length).toBeGreaterThan(0);
-      expect(results[0].hash).toBe("fts1");
-      expect(results[0].source).toBe("fts");
+      expect(results[0]!.hash).toBe("fts1");
+      expect(results[0]!.source).toBe("fts");
     });
 
-    test("searchFts ranks by relevance", async () => {
+    test("searchFTS ranks by relevance", async () => {
       const now = new Date().toISOString();
       await store.insertContent("high", "Database database database optimization", now);
       await store.insertContent("low", "Some database info here", now);
       await store.insertDocument("coll", "high.md", "Database Heavy", "high", now, now);
       await store.insertDocument("coll", "low.md", "Light Mention", "low", now, now);
 
-      const results = await store.searchFts("database", 10);
+      const results = await store.searchFTS("database", 10);
 
       // Document with more occurrences should rank higher
       expect(results.length).toBe(2);
-      expect(results[0].hash).toBe("high");
+      expect(results[0]!.hash).toBe("high");
     });
   });
 });
